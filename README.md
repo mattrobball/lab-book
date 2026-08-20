@@ -32,7 +32,12 @@ should not exist.
 
 ## Install
 
-One line, any of 40+ coding-agent CLIs:
+Already inside a coding agent? Say:
+
+    install the skill from mattrobball/lab-book
+
+and it runs the install itself. From a shell, one line covers any of 40+
+coding-agent CLIs:
 
     npx skills add mattrobball/lab-book
 
