@@ -58,6 +58,10 @@ Or by hand: copy the `skills/lab-book/` directory into your CLI's skill path.
 | pi | `~/.pi/agent/skills/` |
 | shared, where supported | `~/.agents/skills/` |
 
+New skills load without a restart in Claude Code (it watches the skill
+directories), Copilot (`/skills reload`), and pi (`/reload`); Codex and Gemini
+sessions need a restart to see them.
+
 For example:
 
     cp -R skills/lab-book ~/.claude/skills/
