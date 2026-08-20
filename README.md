@@ -46,7 +46,7 @@ Claude Code can also install it as a plugin:
     /plugin marketplace add mattrobball/lab-book
     /plugin install lab-book@lab-book
 
-Or by hand: copy the `skills/lab-book/` directory into your CLI's skill path.
+Or by hand: copy the `skills/open-lab/` directory into your CLI's skill path.
 
 | CLI | Path |
 |---|---|
@@ -64,13 +64,23 @@ sessions need a restart to see them.
 
 For example:
 
-    cp -R skills/lab-book ~/.claude/skills/
+    cp -R skills/open-lab ~/.claude/skills/
 
-Then open a session anywhere and say: **set up a lab here**. The model asks you
-five questions about the problem, probes the machine for the agent tools and
-subject tools it can actually use, searches the literature on your exact
-question, shows you what it found, writes the confirmed list to `lab.json`, and
-scaffolds the lab into that repository.
+## Use
+
+The skill is called **`open-lab`**, and that is the whole interface: you open the
+lab whether or not one is there yet.
+
+Open a session anywhere and say **open the lab** (or `/open-lab`). The first time,
+in a repository with no lab in it, the model asks you five questions about the
+problem, probes the machine for the agent tools and subject tools it can actually
+use, searches the literature on your exact question, shows you what it found,
+writes the confirmed list to `lab.json`, and scaffolds the lab into that
+repository.
+
+Every morning after, in a repository that already has one, the same phrase runs
+catchup — the runs, verdicts, and claim changes since you were last here — reads
+`STATUS.md`, and tells you where things stand before proposing the next move.
 
 A worked reference instance — a real problem, real runs, real claims, and one
 real failure filed the honest way — exists and will be published once it holds
@@ -80,7 +90,7 @@ up as an example worth copying.
 
 Complete and dogfooded: the charter, the two references, the templates, and both
 scripts with their test suite (`python3 -m unittest` from
-`skills/lab-book/scripts/tests/`).
+`skills/open-lab/scripts/tests/`).
 
 ## Contributing
 

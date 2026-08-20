@@ -2,7 +2,7 @@
 """Tests for run.py. Each test builds a throwaway git repo in a temp dir and
 drives the script as a subprocess, the way a Director would.
 
-Run from lab-book/scripts/tests/:  python3 -m unittest
+Run from open-lab/scripts/tests/:  python3 -m unittest
 """
 import json
 import shutil

@@ -83,7 +83,7 @@ across repositories is a citation, never a dependency.
 
 - `references/claims.md` (what a claim is, the statuses, promotion) and
   `references/runs.md` (setup, dispatch, the return packet, ingest, catchup) in
-  the lab-book skill; open one when you reach its step, not before.
+  the open-lab skill; open one when you reach its step, not before.
 - `claims.py` and `run.py` live at the root of this repository, beside this
   charter, along with `templates/`.
 - `problems/<slug>/STATUS.md` is the current bottom line for a problem. It is

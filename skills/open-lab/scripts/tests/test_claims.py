@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for claims.py. Each test builds a throwaway git repo in a temp dir.
 
-Run from lab-book/scripts/tests/:  python3 -m unittest
+Run from open-lab/scripts/tests/:  python3 -m unittest
 """
 import json
 import os

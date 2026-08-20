@@ -1,6 +1,6 @@
 ---
-name: lab-book
-description: Lab notebook infrastructure for running a research program inside a coding-agent session. Use it to set up a new lab in a repository — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates — and to run an existing one: writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "set up a lab here", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
+name: open-lab
+description: Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
   version: "1.0.0"
@@ -29,6 +29,12 @@ If the current repository has an `AGENTS.md` naming the Director and a
 Follow that charter — it is the binding document — and open
 `references/claims.md` or `references/runs.md` from this skill when you reach
 the step each one covers.
+
+Opening an existing lab starts with catchup: run `run.py catchup` for the runs,
+verdicts, and claim changes since the last session, read `STATUS.md`, and tell
+the Investigator where things stand in plain sentences before proposing the next
+move. This prevents the day starting from memory of a session that is not in
+this context.
 
 ## Setting up a new lab
 
