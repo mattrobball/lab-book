@@ -1,0 +1,9 @@
+{
+  "headline": "<one sentence>",
+  "exits": ["<what was reached>"],
+  "validation": "<replay | review>",
+  "machine_markers": ["<MARKER_ONE_OK>"],
+  "honesty_tier": "<machine-verified | hand-checked | asserted>",
+  "claims_used": ["<C-NNN>"],
+  "claims_proposed": ["<a statement someone could show to be wrong>"]
+}
