@@ -459,5 +459,207 @@ class TestSpine(LabCase):
         self.assertIn("git", err)
 
 
+class TestParallelFence(LabCase):
+    """The fence judges what this worker could have written, never what the
+    Director or a sibling run did while it worked."""
+
+    def test_director_commits_do_not_implicate_a_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        # The Director rewrites belief documents mid-flight, any subject line.
+        (self.problem / "STATUS.md").write_text("# Status: demo\n\nRewritten.\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m",
+            "Reduce remaining classification to three proof gates")
+        self.ok("ingest", rid)
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_sibling_run_dirt_does_not_implicate_a_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        sibling = self.problem / "runs" / "R-099" / "packet"
+        sibling.mkdir(parents=True)
+        (sibling / "scratch.py").write_text("pass\n")     # uncommitted
+        self.ok("ingest", rid)
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_a_real_escape_is_still_caught_and_the_reason_kept(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        (self.problem / "stray.txt").write_text("worker was here\n")
+        err = self.refused("ingest", rid)
+        self.assertIn("wrote outside its fence", err)
+        self.assertIn("stray.txt", err)
+        refusal = self.problem / "runs" / rid / "refusal.txt"
+        self.assertTrue(refusal.exists())
+        self.assertIn("stray.txt", refusal.read_text())
+
+
+class TestFailureTaxonomy(LabCase):
+
+    def test_record_broken_quotes_the_refusal_and_salvages_leads(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, drop=("Not claimed",),
+                    ret={"claims_proposed": ["The bound is 17."]})
+        self.refused("ingest", rid)                       # writes refusal.txt
+        r = self.ok("ingest", rid, "--record-broken")
+        self.assertIn("UNINGESTABLE", r.stdout)
+        rec = self.ingest_json(rid)
+        self.assertIn("Not claimed", rec["refused_for"][0])
+        entry = (self.problem / "notebook" / "entries" /
+                 self.entries()[0]).read_text()
+        self.assertIn("Not claimed", entry)               # the reason, named
+        self.assertIn("The bound is 17.", entry)          # salvage, untrusted
+        self.assertIn("Dropped the greedy order", entry)  # leads survive
+        self.assertIn("not on record", entry)
+        self.assertEqual(rec["claims"], [])
+
+    def test_no_packet_files_as_harness_failure(self):
+        rid, _ = self.dispatch()
+        r = self.ok("ingest", rid, "--record-broken")
+        self.assertIn("HARNESS-FAILURE", r.stdout)
+        self.assertEqual(self.ingest_json(rid)["verdict"], "HARNESS-FAILURE")
+        self.assertIn("HARNESS-FAILURE", self.log())
+
+    def test_pending_verdict_names_the_unfinished_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, verdict="PENDING")
+        err = self.refused("ingest", rid)
+        self.assertIn("PENDING", err)
+        self.assertIn("never finished", err)
+
+
+class TestVoidLintWaive(LabCase):
+
+    def test_void_closes_a_run_that_produced_nothing(self):
+        rid, _ = self.dispatch()
+        r = self.ok("void", rid, "--reason", "launch blocked; superseded by a "
+                                             "fresh dispatch")
+        self.assertIn("voided", r.stdout)
+        self.assertEqual(self.dispatch_json(rid)["status"], "void")
+        self.assertIn("VOID", self.log())
+        self.assertNotIn(rid, self.ok("catchup", "2020-01-01")
+                         .stdout.split("Still open:")[1])
+
+    def test_void_refuses_when_a_packet_exists(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        err = self.refused("void", rid, "--reason", "tidy")
+        self.assertIn("has a packet", err)
+
+    def test_lint_reports_and_passes(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, drop=("Leads",))
+        r = self.ok("lint", rid)
+        self.assertIn("does not pass", r.stdout)
+        self.packet(rid)
+        self.assertIn("passes the contract", self.ok("lint", rid).stdout)
+        # lint changed nothing: the run is still open and ingestable
+        self.assertEqual(self.dispatch_json(rid)["status"], "open")
+
+    def test_waive_review_clears_the_owed_line(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, validation="**Review** — recheck step 3.",
+                    ret={"validation": "review", "machine_markers": []})
+        self.ok("ingest", rid)
+        self.assertIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
+        self.ok("waive-review", rid, "--reason", "referee providers are down; "
+                                                 "accepted as-is for now")
+        self.assertNotIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
+
+
+class TestIndependence(LabCase):
+    """Promotion records how independent the check was; same model needs an
+    explicit flag and is marked, never refused outright."""
+
+    def promote(self, *extra):
+        first, _ = self.dispatch(self.brief("Find the bound.", "b1.md"))
+        self.packet(first, ret={"claims_proposed": ["The bound is 9."]})
+        self.ok("ingest", first)
+        cid = self.ingest_json(first)["claims"][0]
+        second, _ = self.dispatch(self.brief("C claims the bound is 9; review "
+                                             "the claim adversarially but "
+                                             "fairly.", "b2.md"), extra=extra)
+        self.packet(second, headline="Attacked it; could not break it.")
+        self.ok("ingest", second)
+        return cid, second
+
+    def test_same_model_needs_the_flag_and_is_marked(self):
+        cid, ev = self.promote()                          # both worker-a
+        err = self.claims_refused("set", cid, "verified", "--actor", "director",
+                                  "--evidence", ev, "--rests-on", "none")
+        self.assertIn("same model", err)
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none",
+                       "--accept-same-model")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Independence:** none (same model", view)
+
+    def test_cross_model_promotes_clean_and_is_marked_full(self):
+        cid, ev = self.promote("--model", "worker-b")
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Independence:** full", view)
+
+    def test_a_fall_prints_its_dependents(self):
+        cid, ev = self.promote("--model", "worker-b")
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none")
+        dep = self.claims_py("new", "--statement", "Therefore the gap closes.",
+                             "--actor", "director", "--rests-on", cid)
+        r = self.claims_ok("set", cid, "refuted", "--actor", "director")
+        self.assertIn("Standing on %s" % cid, r.stdout)
+        self.assertIn(dep, r.stdout)
+
+    def claims_ok(self, *args):
+        r = self.script(CLAIMS, *args)
+        self.assertEqual(r.returncode, 0, "expected success, got:\n%s%s"
+                         % (r.stdout, r.stderr))
+        return r
+
+    def claims_refused(self, *args):
+        r = self.script(CLAIMS, *args)
+        self.assertEqual(r.returncode, 2, "expected refusal, got:\n%s%s"
+                         % (r.stdout, r.stderr))
+        return r.stderr
+
+
+class TestAcceptedByInvestigator(LabCase):
+
+    def test_records_the_decision_and_catchup_lists_it(self):
+        cid = self.claims_py("new", "--statement",
+                             "Steen: the type-D spectrum is {0,...,n-2}.",
+                             "--actor", "director")
+        err = self.script(CLAIMS, "set", cid, "accepted-by-investigator",
+                          "--actor", "director").stderr
+        self.assertIn("--evidence", err)
+        r = self.script(CLAIMS, "set", cid, "accepted-by-investigator",
+                        "--actor", "director", "--evidence",
+                        "Investigator instruction 2026-08-23: take it as "
+                        "proved; thesis embargoed to 2099")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("accepted on the Investigator's word",
+                      self.ok("catchup", "2020-01-01").stdout)
+
+
+class TestDuplicateWarningLifecycle(LabCase):
+
+    def test_warning_persists_until_the_claim_moves(self):
+        self.claims_py("new", "--statement",
+                       "The largest cap in AG(4,3) has 20 points.",
+                       "--actor", "director")
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed":
+                              ["The largest cap in AG(4,3) has 20 points."]})
+        self.ok("ingest", rid)
+        cid = self.ingest_json(rid)["claims"][0]
+        self.assertIn("duplicate warning", self.ok("catchup", "2020-01-01").stdout)
+        self.claims_py("set", cid, "superseded", "--actor", "director",
+                       "--by", "C-001")
+        self.assertNotIn("duplicate warning",
+                         self.ok("catchup", "2020-01-01").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
