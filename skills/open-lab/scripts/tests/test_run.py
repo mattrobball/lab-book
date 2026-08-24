@@ -288,35 +288,37 @@ class TestHonestyTier(LabCase):
         self.packet(rid, marker="NEVER_PRINTED_OK",
                     command="printf '%s\\n' SOMETHING_ELSE")
         r = self.ok("ingest", rid)
-        self.assertIn("asserted", r.stdout)
+        self.assertIn("replayed: no", r.stdout)
         self.assertIn("never printed", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
 
     def test_nonzero_exit_is_asserted_even_with_markers(self):
         rid, _ = self.dispatch()
         self.packet(rid, command="printf '%s\\n' CHECK_OK; exit 3")
         r = self.ok("ingest", rid)
         self.assertIn("exited 3", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
 
-    def test_clean_replay_is_machine_verified(self):
+    def test_clean_replay_is_recorded(self):
         rid, _ = self.dispatch()
         self.packet(rid)
         r = self.ok("ingest", rid)
-        self.assertIn("machine-verified", r.stdout)
+        self.assertIn("replayed: yes", r.stdout)
         rec = self.ingest_json(rid)
-        self.assertEqual(rec["honesty_tier"], "machine-verified")
+        self.assertIs(rec["replayed"], True)
         self.assertEqual(rec["replay"]["exit"], 0)
         self.assertEqual(rec["warnings"], [])
 
-    def test_worker_tier_is_not_believed(self):
+    def test_worker_self_grade_is_ignored(self):
+        """Whatever a worker says about its own standing is not read at all:
+        replayed is computed here, from the replay alone."""
         rid, _ = self.dispatch()
         self.packet(rid, marker="NEVER_PRINTED_OK",
                     command="printf '%s\\n' SOMETHING_ELSE",
                     ret={"honesty_tier": "machine-verified"})
         r = self.ok("ingest", rid)
-        self.assertIn("the worker reported machine-verified", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
+        self.assertNotIn("machine-verified", r.stdout)
 
     def test_review_is_asserted_until_a_referee_run_checks_it(self):
         first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
@@ -324,38 +326,34 @@ class TestHonestyTier(LabCase):
                                       "induction step for n = 4.",
                     ret={"validation": "review", "machine_markers": []})
         r = self.ok("ingest", first)
-        self.assertIn("asserted", r.stdout)
-        self.assertIn("no referee run has checked this yet", r.stdout)
-        self.assertIn("%s declared a review" % first, self.ok("check").stdout)
+        self.assertIn("replayed: no", r.stdout)
+        self.assertIn("no referee run has checked", r.stdout)
+        self.assertIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
 
         second, _ = self.dispatch(self.brief("Referee %s." % first, "b2.md"),
                                   extra=["--model", "worker-b"])
         self.packet(second, headline="The induction step holds.",
                     ret={"reviewed": [first]})
         self.ok("ingest", second)
-        self.assertEqual(self.ingest_json(first)["honesty_tier"], "hand-checked")
         self.assertEqual(self.ingest_json(first)["reviewed_by"], [second])
-        self.assertEqual(self.dispatch_json(first)["honesty_tier"], "hand-checked")
-        self.assertNotIn("declared a review", self.ok("check").stdout)
+        self.assertNotIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
 
-    def test_a_review_never_overwrites_machine_verified(self):
-        """A replay this lab ran outranks a referee reading the work: the
-        review is recorded, the tier it earned is left alone."""
+    def test_replay_and_review_are_separate_facts(self):
+        """Not a ladder: a replayed run that also gets reviewed records both,
+        and neither rewrites the other."""
         first, _ = self.dispatch(self.brief("Count them.", "b1.md"))
         self.packet(first)
         self.ok("ingest", first)
-        self.assertEqual(self.ingest_json(first)["honesty_tier"], "machine-verified")
+        self.assertIs(self.ingest_json(first)["replayed"], True)
 
         second, _ = self.dispatch(self.brief("Referee %s." % first, "b2.md"),
                                   extra=["--model", "worker-b"])
         self.packet(second, headline="The count holds.", ret={"reviewed": [first]})
         r = self.ok("ingest", second)
-        self.assertIn("stays machine-verified", r.stdout)
-        self.assertIn("never overwrites a tier a replay earned", r.stdout)
+        self.assertIn("reviewed by %s" % second, r.stdout)
         rec = self.ingest_json(first)
-        self.assertEqual(rec["honesty_tier"], "machine-verified")
+        self.assertIs(rec["replayed"], True)
         self.assertEqual(rec["reviewed_by"], [second])
-        self.assertEqual(self.dispatch_json(first)["honesty_tier"], "machine-verified")
 
     def test_a_referee_with_the_same_actor_is_refused(self):
         first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
@@ -386,7 +384,7 @@ class TestSpine(LabCase):
                          "claims_proposed": ["The largest cap in AG(4,3) has 20 "
                                              "points."]})
         r = self.ok("ingest", rid)
-        self.assertIn("R-001 PASS (machine-verified)", r.stdout)
+        self.assertIn("R-001 PASS (replayed: yes)", r.stdout)
 
         # The proposed claim went through the ledger, as proposed, credited to
         # the actor dispatch stamped — never to the worker's own say-so.
@@ -401,7 +399,7 @@ class TestSpine(LabCase):
         self.assertEqual(len(self.entries()), 1)
         entry = (self.problem / "notebook" / "entries" / self.entries()[0]).read_text()
         self.assertIn("**Verdict:** PASS", entry)
-        self.assertIn("machine-verified", entry)
+        self.assertIn("**Replayed:** yes", entry)
         self.assertIn("CHECK_OK", entry)
         self.assertIn("Dropped the greedy order", entry)      # Leads, verbatim
         self.assertIn("C-002", entry)
@@ -414,7 +412,7 @@ class TestSpine(LabCase):
         self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
 
         cat = self.ok("catchup", "2020-01-01").stdout
-        self.assertIn("R-001 PASS (machine-verified)", cat)
+        self.assertIn("R-001 PASS (replayed)", cat)
         self.assertIn("C-002 stated as proposed", cat)
         self.assertIn("Still open:\n  nothing", cat)
         self.assertIn("run(s) ingested since", cat)
@@ -443,12 +441,13 @@ class TestSpine(LabCase):
         self.assertIn("looks close to C-001", r.stdout)
         self.assertIn("C-002", r.stdout)
 
-    def test_check_flags_an_open_run(self):
+    def test_open_runs_listed_by_catchup(self):
         rid, _ = self.dispatch()
-        self.assertIn("%s is still open" % rid, self.ok("check").stdout)
+        self.assertIn(rid, self.ok("catchup", "2020-01-01").stdout)
         self.packet(rid)
         self.ok("ingest", rid)
-        self.assertIn("Nothing to flag", self.ok("check").stdout)
+        self.assertIn("Still open:\n  nothing",
+                      self.ok("catchup", "2020-01-01").stdout)
 
     def test_refuses_outside_a_git_repo(self):
         loose = Path(tempfile.mkdtemp(prefix="nogit-"))

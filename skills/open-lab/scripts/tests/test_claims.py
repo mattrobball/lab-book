@@ -105,12 +105,13 @@ class TestTransitions(LabCase):
     def test_nonsense_status_refused(self):
         cid = self.new("A holds.")
         err = self.refused("set", cid, "probably-true", "--actor", "bob")
-        self.assertIn("not one of the six statuses", err)
+        self.assertIn("not one of the statuses", err)
 
     def test_verified_to_conditional_refused(self):
         self.ingest_run()
         cid = self.new("A holds.")
-        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007")
+        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
+                "--rests-on", "none")
         err = self.refused("set", cid, "conditional", "--actor", "bob")
         self.assertIn("cannot become conditional", err)
         self.assertEqual(self.status_of(cid), "verified")
@@ -186,7 +187,8 @@ class TestPromotionGates(LabCase):
                            "--evidence", "R-002")
         self.assertIn("rests on %s (proposed)" % base, err)
         # Verify the dependency, then the same promotion goes through.
-        self.ok("set", base, "verified", "--actor", "bob", "--evidence", "R-001")
+        self.ok("set", base, "verified", "--actor", "bob", "--evidence", "R-001",
+                "--rests-on", "none")
         self.ok("set", dep, "verified", "--actor", "bob", "--evidence", "R-002")
         self.assertEqual(self.status_of(dep), "verified")
 
@@ -196,7 +198,8 @@ class TestCheck(LabCase):
     def test_check_flags_text_drift(self):
         self.ingest_run()
         cid = self.new("The check passed on all 40 inputs.")
-        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007")
+        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
+                "--rests-on", "none")
         view = self.problem / "claims" / (cid + ".md")
         view.write_text(view.read_text().replace("all 40 inputs", "every input"))
         r = self.ok("check")
@@ -212,7 +215,8 @@ class TestCheck(LabCase):
     def test_check_is_quiet_when_all_is_well(self):
         self.ingest_run()
         cid = self.new("A holds.")
-        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007")
+        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
+                "--rests-on", "none")
         r = self.ok("check")
         self.assertIn("Nothing to flag", r.stdout)
 
@@ -229,9 +233,11 @@ class TestSpine(LabCase):
         self.assertEqual(self.commits(), before + 1)
 
         self.ok("set", cid, "conditional", "--actor", "director")
-        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007")
+        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
+                "--rests-on", "none")
         self.ok("set", cid, "proposed", "--actor", "director")
-        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-011")
+        self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-011",
+                "--rests-on", "none")
         self.assertEqual(self.status_of(cid), "verified")
         # one commit for the allocation and one for each of the four moves
         self.assertEqual(self.commits(), before + 5)

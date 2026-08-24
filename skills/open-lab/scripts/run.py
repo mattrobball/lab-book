@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Runs: dispatch a worker, ingest what it returns, keep the notebook.
 
-new      allocate R-NNN, record dispatch.json, assemble PROMPT.md and the
-         run-local worker charter, launch the worker in the run directory.
-ingest   gate the returned packet, replay its evidence, compute the honesty
-         tier, allocate proposed claims, file the notebook entry, commit.
+new      allocate R-NNN, record dispatch.json and execution.json, assemble
+         PROMPT.md and the run-local worker charter, launch the worker.
+ingest   gate the returned packet, replay its evidence, allocate proposed
+         claims, file the notebook entry, commit.
+lint     read-only packet contract check; workers run it before finishing.
+void     close a run that produced nothing, with the reason on record.
+waive-review  record that an owed review will not happen, with the reason.
 note     file a Director-written entry: headline, body, actor. No packet.
-catchup  what changed since a commit or a date.
-check    advisory lint: open runs, reviews owed, STATUS.md staleness.
+catchup  what changed since a commit or a date, plus the standing lints:
+         runs needing attention, reviews owed, unresolved duplicate warnings,
+         claims resting on unverified claims, per-model totals.
 
 Claim IDs, status and the ledger belong to claims.py; this file imports it and
 never touches claims/ by hand.
@@ -17,23 +21,32 @@ Three conventions this file settles:
 * The replay command is the first fenced or indented code block inside the
   packet's `## Validation` section. It runs with the run directory as its
   working directory, under the timeout recorded at dispatch.
-* The honesty tier is computed here and never copied from the worker. Replay
-  declared, exit 0 inside the timeout, and every marker present as an exact
-  substring is `machine-verified`; anything else at this ingest is `asserted`,
-  with a warning saying which of the three failed. `hand-checked` is written
-  later: when a referee run whose RETURN.json lists this run in `reviewed` is
-  ingested with verdict PASS, by a different actor.
-* A packet that fails a gate is refused, not filed. Filing a bad packet is a
-  separate deliberate act: `ingest R-NNN --record-broken`, which commits the
-  packet as it stands under verdict UNINGESTABLE and allocates no claims.
+* Replay and review are recorded as facts, never ranked. `replayed` is
+  computed here — exit 0 inside the timeout and every marker present as an
+  exact substring — and never copied from the worker. A marker proves a print
+  statement ran, nothing more; what the replay recomputes is what it is worth.
+  `reviewed_by` lists the referee runs that later checked this one.
+* The fence is judged only against what this worker could have written:
+  uncommitted files outside its allowed paths, excluding other runs'
+  directories. Committed history is never consulted, so nothing the Director
+  or a sibling run commits can implicate a worker.
+* A packet that fails a gate is refused, not filed, and the refusal text is
+  saved to the run directory as refusal.txt. Filing the failure is a separate
+  deliberate act: `ingest R-NNN --record-broken` files a packet that exists
+  under verdict UNINGESTABLE, or, when the worker never produced one, under
+  verdict HARNESS-FAILURE — with the recorded reason either way, and no
+  claims. What a refused packet proposed is quoted in the entry as untrusted
+  text, so a refusal never silently destroys a lead.
 """
 import argparse
 import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -52,7 +65,7 @@ INDENTED = re.compile(r"^(?: {4}|\t)(\S.*)$", re.M)
 INDEX_META = re.compile(r"<!-- index: (.*?) -->")
 SECTIONS = ["What was done", "Not claimed", "Leads", "Validation"]
 REQUIRED = ["headline", "exits", "validation", "machine_markers",
-            "honesty_tier", "claims_used", "claims_proposed"]
+            "claims_used", "claims_proposed"]
 STOP = {"the", "a", "an", "of", "is", "in", "on", "for", "to", "and", "at",
         "has", "have", "every", "all", "with", "that", "this", "it", "are"}
 
@@ -70,7 +83,8 @@ You may create or modify files only under these paths:
 {allowed}
 
 Anything written outside them makes this run unusable, and the run is refused
-at ingest rather than filed.
+at ingest rather than filed. Write nothing outside this repository either —
+no /tmp, no home directory; scratch files belong in your packet directory.
 
 - Run no `git` commands of any kind. The lab records itself.
 - Never invent a claim ID. Copy into `claims_used` exactly the IDs the brief
@@ -84,7 +98,12 @@ Both of these files, under `{packet}`:
 
 `RESULT.md`
 
-- First line exactly `# VERDICT: PASS`, `# VERDICT: FAIL` or
+- Create this file first, with the first line `# VERDICT: PENDING`, and fill
+  the sections in as you work — never save the writing for the end. A worker
+  that dies mid-task then leaves its partial findings instead of nothing.
+  Replace PENDING with the real verdict as your last act; a packet still
+  reading PENDING cannot be ingested.
+- The final first line is exactly `# VERDICT: PASS`, `# VERDICT: FAIL` or
   `# VERDICT: UNDECIDED`, then one sentence saying what happened.
 - `## What was done` — what you actually did, in order, closely enough that
   someone could follow it.
@@ -107,11 +126,14 @@ Both of these files, under `{packet}`:
 - `validation` — `replay` or `review`, matching the block above.
 - `machine_markers` — the exact strings a passing replay prints; ingest looks
   for each one character for character, never by pattern.
-- `honesty_tier` — your own reading: `machine-verified`, `hand-checked` or
-  `asserted`. Ingest computes the tier that goes on record and only compares
-  yours against it.
 - `claims_used` — the claim IDs copied from the brief.
 - `claims_proposed` — new claims as plain statements, never IDs.
+
+## Before you finish
+
+Run `python3 <lab root>/run.py lint {rid}` from anywhere in the lab. It is
+read-only and prints exactly what the packet contract still needs. Do not
+finish until it passes.
 
 ## The honest stop
 
@@ -294,6 +316,114 @@ def regenerate_index(problem):
     (problem / "notebook" / "INDEX.md").write_text("\n".join(rows) + "\n")
 
 
+# ---------------------------------------------------------------- execution
+
+def extract_usage(log, pattern):
+    """Best-effort resource accounting. lab.json roles may set usage_pattern,
+    a regex with named groups (tokens, cost) run over the worker log; absent
+    that, a bare default catches the common 'N tokens' print. Missing numbers
+    stay missing — never guessed."""
+    if not log.exists():
+        return None
+    try:
+        text = log.read_text(errors="replace")[-20000:]
+    except OSError:
+        return None
+    pat = pattern or r"([\d,.]+[KkMm]?)\s*(?:total\s+)?tokens"
+    try:
+        hits = list(re.finditer(pat, text))
+    except re.error:
+        return None
+    if not hits:
+        return None
+    m = hits[-1]
+    usage = {}
+    groups = m.groupdict()
+    if groups:
+        usage = {k: v for k, v in groups.items() if v}
+    elif m.groups():
+        usage["tokens"] = m.group(1)
+    return usage or None
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def ingest_lock(root):
+    """One ingest transaction at a time. On contention we wait instead of
+    corrupting .git/index, which once needed a hand rollback."""
+    lock = root / ".ingest.lock"
+    deadline = time.time() + 120
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() > deadline:
+                refuse("another ingest has held %s for over two minutes. If "
+                       "it crashed, remove the file and run this again." % lock)
+            time.sleep(1)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(str(lock))
+
+
+def execution_record(problem, rid):
+    p = run_dir(problem, rid) / "execution.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def resource_line(problem, rid):
+    e = execution_record(problem, rid)
+    if not e:
+        return None
+    bits = []
+    if e.get("wall_seconds") is not None:
+        bits.append("%dm%02ds wall" % divmod(e["wall_seconds"], 60))
+    for k, v in sorted((e.get("usage") or {}).items()):
+        bits.append("%s %s" % (v, k))
+    return " · ".join(bits) if bits else None
+
+
+def overdue_report(problem, skip=()):
+    """Printed at the end of new and ingest, so a stalled run cannot hide
+    behind a lint nobody runs. Every line names its remedy."""
+    lines = []
+    for rid, d in all_runs(problem):
+        if d["status"] != "open" or rid in skip:
+            continue
+        e = execution_record(problem, rid)
+        if e and e.get("end"):
+            lines.append("%s: worker exited %s — ingest it or `run.py void %s "
+                         "--reason ...`" % (rid, e["end"], rid))
+        else:
+            age = (datetime.now(timezone.utc)
+                   - datetime.strptime(d["ts"], "%Y-%m-%dT%H:%M:%SZ")
+                   .replace(tzinfo=timezone.utc)).total_seconds()
+            if age > 6 * 3600:
+                lines.append("%s: open %dh with no worker exit on record — "
+                             "investigate, or `run.py void %s --reason ...`"
+                             % (rid, int(age // 3600), rid))
+    if lines:
+        print("Needs attention:")
+        for l in lines:
+            print("- " + l)
+
+
 # ---------------------------------------------------------------- new
 
 def cmd_new(args):
@@ -374,19 +504,43 @@ def cmd_new(args):
                "prompt file goes, or prepare the run with --no-launch and "
                "start the worker yourself." % (args.role, args.role))
     line = template.replace("{prompt}", str((rundir / "PROMPT.md").resolve()))
+    argv = shlex.split(line)
+    exe = shutil.which(argv[0])
+    if exe is None:
+        refuse("the launch command starts with %r and nothing by that name is "
+               "on PATH. The worker would die before it began — a launch that "
+               "cannot start is a harness failure, not a run. Fix lab.json's "
+               "command (absolute paths are safest) or install the tool, then "
+               "dispatch again. %s is prepared; start it by hand or void it."
+               % (argv[0], rid))
+    argv[0] = exe
     log = rundir / "worker.log"
+    execution = {"command": line, "executable": exe, "start": now(),
+                 "run": rid}
+    write_json(rundir / "execution.json", execution)
     print("Launching: %s\nWorker output (both streams) goes to %s/worker.log — "
           "`tail -f` it to watch." % (line, rundir_rel))
     sys.stdout.flush()
+    t0 = time.time()
     with open(log, "wb") as fh:           # a worker that dies at its API says
-        r = subprocess.run(shlex.split(line), cwd=str(rundir),   # so only here
-                           stdout=fh, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(argv, cwd=str(rundir),           # so only here
+                                stdout=fh, stderr=subprocess.STDOUT)
+        execution["pid"] = proc.pid
+        write_json(rundir / "execution.json", execution)
+        code = proc.wait()
+    execution.update(end=now(), exit=code,
+                     wall_seconds=int(time.time() - t0))
+    usage = extract_usage(log, role.get("usage_pattern"))
+    if usage:
+        execution["usage"] = usage
+    write_json(rundir / "execution.json", execution)
     size = log.stat().st_size
-    print("Worker exited %d, %d byte(s) in %s/worker.log.%s Ingest with "
-          "`run.py ingest %s`."
-          % (r.returncode, size, rundir_rel,
+    print("Worker exited %d after %ds, %d byte(s) in %s/worker.log.%s Ingest "
+          "with `run.py ingest %s`."
+          % (code, execution["wall_seconds"], size, rundir_rel,
              "" if size else " It printed nothing at all, which usually means "
              "it never really started — read the log before the packet.", rid))
+    overdue_report(problem, skip={rid})
 
 
 # ---------------------------------------------------------------- ingest
@@ -429,6 +583,11 @@ def read_packet(problem, rid, d):
     first = next((l for l in text.splitlines() if l.strip()), "")
     m = VERDICT_LINE.match(first.strip())
     if not m:
+        if "PENDING" in first:
+            refuse("RESULT.md in %s still says PENDING — the worker never "
+                   "finished. The partial sections it wrote are preserved; "
+                   "file the run with `run.py ingest %s --record-broken`, or "
+                   "re-dispatch." % (rid, rid))
         refuse("the first line of %s/packet/RESULT.md is %r. It must be exactly "
                "`# VERDICT: PASS`, `# VERDICT: FAIL` or `# VERDICT: UNDECIDED`. "
                "%s" % (rid, first.strip(), tail))
@@ -489,12 +648,13 @@ def replay_command(validation_text):
 
 
 def do_replay(rundir, secs, ret, rid, timeout):
-    """Returns (tier, warnings, replay record). Nonzero exit fails whatever
-    was printed; markers must appear character for character."""
+    """Returns (replayed, warnings, replay record). Nonzero exit fails
+    whatever was printed; markers must appear character for character. A
+    passing replay proves the command ran and printed the declared strings —
+    what it recomputed is a question for a referee, not for this check."""
     if ret["validation"] == "review":
-        return "asserted", ["validation is a review and no referee run has "
-                            "checked this yet, so nothing here is machine-"
-                            "checked"], None
+        return False, ["validation is a review; no referee run has checked "
+                       "this yet"], None
     cmd = replay_command(secs["validation"])
     if not cmd:
         refuse("%s declares validation `replay` but its `## Validation` section "
@@ -508,18 +668,18 @@ def do_replay(rundir, secs, ret, rid, timeout):
         out, code = r.stdout + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
         record["exit"] = None
-        return "asserted", ["the replay did not finish inside the %ss timeout "
-                            "this dispatch set" % timeout], record
+        return False, ["the replay did not finish inside the %ss timeout "
+                       "this dispatch set" % timeout], record
     record["exit"] = code
     missing = [m for m in ret["machine_markers"] if m not in out]
     if code != 0:
-        return "asserted", ["the replay exited %d; a nonzero exit fails "
-                            "whatever was printed" % code], record
+        return False, ["the replay exited %d; a nonzero exit fails whatever "
+                       "was printed" % code], record
     if missing:
-        return "asserted", ["the replay never printed %s, and markers are "
-                            "matched character for character, never by pattern"
-                            % ", ".join(repr(m) for m in missing)], record
-    return "machine-verified", [], record
+        return False, ["the replay never printed %s, and markers are matched "
+                       "character for character, never by pattern"
+                       % ", ".join(repr(m) for m in missing)], record
+    return True, [], record
 
 
 def allocate_claim(problem, statement, actor):
@@ -549,11 +709,8 @@ def near_duplicates(problem, statement):
 
 def apply_reviews(problem, rid, ret, verdict, actor):
     """A referee run names the run it checked in RETURN.json `reviewed`.
-
-    A review only ever lifts `asserted` to `hand-checked`. It never rewrites
-    `machine-verified`, which a replay this lab ran had already earned — a
-    referee reading the work is not evidence against a check that passed. The
-    referee is recorded on the reviewed run either way, in `reviewed_by`."""
+    Replay and review are separate facts, never a ladder: the review is
+    recorded in the target's `reviewed_by` and rewrites nothing else."""
     notes, touched = [], []
     for target in ret.get("reviewed") or []:
         prev = ingest_record(problem, target) if RUN_ID.match(str(target)) else None
@@ -562,33 +719,18 @@ def apply_reviews(problem, rid, ret, verdict, actor):
                    "ingested run %s here. Name a run this lab ingested, or drop "
                    "the field." % (target, target))
         if verdict != "PASS":
-            notes.append("%s stays %s: a review counts only when the referee "
-                         "returns PASS." % (target, prev["honesty_tier"]))
+            notes.append("%s records no review: a review counts only when the "
+                         "referee returns PASS." % target)
             continue
         if prev["actor"].strip().casefold() == actor.strip().casefold():
             refuse("%s was run by %s and so was this one. A review by the same "
                    "actor validates nothing — dispatch a referee with a "
                    "different actor." % (target, prev["actor"]))
         prev["reviewed_by"] = sorted(set(prev.get("reviewed_by") or []) | {rid})
-        if prev["honesty_tier"] == "asserted":
-            prev["honesty_tier"] = "hand-checked"
-            notes.append("%s is now hand-checked, reviewed by %s." % (target, rid))
-            stamp_tier(problem, target, "hand-checked")
-        else:
-            notes.append("%s stays %s and records the review by %s: a review "
-                         "never overwrites a tier a replay earned."
-                         % (target, prev["honesty_tier"], rid))
+        notes.append("%s reviewed by %s." % (target, rid))
         write_json(run_dir(problem, target) / "ingest.json", prev)
         touched.append(target)
     return notes, touched
-
-
-def stamp_tier(problem, rid, tier):
-    """dispatch.json carries a copy of the tier; keep it from going stale."""
-    path = run_dir(problem, rid) / "dispatch.json"
-    d = json.loads(path.read_text())
-    d["honesty_tier"] = tier
-    write_json(path, d)
 
 
 def cmd_ingest(args):
@@ -599,47 +741,113 @@ def cmd_ingest(args):
     actor = d["actor"]
 
     if args.record_broken:
-        d.update(status="uningestable", verdict="UNINGESTABLE", ingested_at=now())
+        packet = rundir / "packet"
+        has_packet = (packet / "RESULT.md").exists() or \
+                     (packet / "RETURN.json").exists()
+        verdict = "UNINGESTABLE" if has_packet else "HARNESS-FAILURE"
+        reasons = []
+        refusal = rundir / "refusal.txt"
+        if refusal.exists():
+            reasons.append(refusal.read_text().strip())
+        e = execution_record(problem, rid)
+        if e:
+            if e.get("exit") not in (0, None):
+                reasons.append("worker exited %s" % e["exit"])
+            elif not e.get("end"):
+                reasons.append("no worker exit on record")
+        if not reasons:
+            reasons.append("no reason recorded — the gates were never run "
+                           "against this packet")
+        # A refusal never silently destroys a lead: quote what the packet
+        # proposed, provenance-marked, allocating nothing.
+        salvage = []
+        try:
+            ret = json.loads((packet / "RETURN.json").read_text())
+            for p in ret.get("claims_proposed") or []:
+                if isinstance(p, str):
+                    salvage.append("proposed (untrusted, no ID): %s" % p)
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        try:
+            secs = split_sections((packet / "RESULT.md").read_text())
+            if secs.get("leads"):
+                salvage.append("Leads (untrusted):\n\n%s" % secs["leads"])
+        except OSError:
+            pass
+        d.update(status=verdict.lower(), verdict=verdict, ingested_at=now())
         write_json(rundir / "dispatch.json", d)
         write_json(rundir / "ingest.json",
                    {"run": rid, "ts": now(), "actor": actor,
-                    "verdict": "UNINGESTABLE", "honesty_tier": "asserted",
-                    "validation": None, "headline": "packet filed unread",
-                    "claims": [], "warnings": ["filed with --record-broken: "
-                                               "the packet did not pass the "
-                                               "gates and nothing in it counts"]})
-        entry = file_entry(problem, "%s returned a packet that could not be "
-                                    "ingested" % rid,
-                           "%s | %s | UNINGESTABLE | packet filed as it stands"
-                           % (time.strftime("%Y-%m-%d", time.gmtime()), rid),
-                           "**Run:** %s · **Actor:** %s · **Verdict:** "
-                           "UNINGESTABLE\n\nThe packet is committed as it "
-                           "stands. No claims were allocated and nothing in it "
-                           "is on record. Packets are never hand-edited; "
-                           "recovery is a fresh dispatch." % (rid, actor))
+                    "verdict": verdict, "replayed": False,
+                    "validation": None,
+                    "headline": "filed without ingest: " + reasons[0],
+                    "claims": [], "refused_for": reasons,
+                    "warnings": ["filed with --record-broken: nothing in this "
+                                 "packet is on record"]})
+        headline = ("%s never produced a packet" % rid if verdict ==
+                    "HARNESS-FAILURE" else
+                    "%s returned a packet that could not be ingested" % rid)
+        body = ["**Run:** %s · **Actor:** %s · **Verdict:** %s"
+                % (rid, actor, verdict), "",
+                "## Why", ""] + ["- " + r for r in reasons]
+        if salvage:
+            body += ["", "## Salvaged from the packet (not on record)", ""]
+            body += ["- " + x if not x.startswith("Leads") else "\n" + x
+                     for x in salvage]
+        body += ["", "Nothing here counts as evidence. Packets are never "
+                 "hand-edited; recovery is a fresh dispatch."]
+        res = resource_line(problem, rid)
+        if res:
+            body += ["", "**Resources:** " + res]
+        entry = file_entry(problem, headline,
+                           "%s | %s | %s | %s"
+                           % (time.strftime("%Y-%m-%d", time.gmtime()), rid,
+                              verdict, reasons[0][:80]),
+                           "\n".join(body))
         commit(root, [rel(rundir, root), rel(problem / "notebook", root)],
-               "%s UNINGESTABLE (packet filed as it stands)" % rid)
-        print("%s filed as UNINGESTABLE. No claims allocated. Entry: %s"
-              % (rid, rel(entry, root)))
+               "%s %s: %s" % (rid, verdict, reasons[0][:60]))
+        print("%s filed as %s (%s). No claims allocated. Entry: %s"
+              % (rid, verdict, reasons[0][:80], rel(entry, root)))
+        overdue_report(problem, skip={rid})
         return
 
-    verdict, secs, ret = read_packet(problem, rid, d)
+    e = execution_record(problem, rid)
+    if e and e.get("pid") and not e.get("end") and pid_alive(e["pid"]):
+        if not args.worker_done:
+            refuse("%s's worker (pid %s) is still running. Ingesting a live "
+                   "run lets the worker keep writing into an already-filed "
+                   "packet — the mutation this lab has been burned by. Wait "
+                   "for it, kill it, or pass --worker-done to override."
+                   % (rid, e["pid"]))
 
-    changed = set(git(root, "diff", "--name-only", d["git_head"], "HEAD").stdout.split())
-    changed = (changed | dirty(root)) - set(d.get("ignore") or [])
-    bad = outside(changed, d["allowed"])
-    if bad:
-        refuse("%s wrote outside its fence: %s. It was allowed %s and nothing "
-               "else. The run is not filed. Recovery is a fresh dispatch with "
-               "the fence stated in the brief, or `run.py ingest %s "
-               "--record-broken` to file the packet as it stands."
-               % (rid, ", ".join(bad), ", ".join(d["allowed"]), rid))
+    try:
+        verdict, secs, ret = read_packet(problem, rid, d)
 
-    tier, warnings, replay = do_replay(rundir, secs, ret, rid, d["timeout"])
-    if ret.get("honesty_tier") and ret["honesty_tier"] != tier:
-        warnings.append("the worker reported %s; this ingest computes %s"
-                        % (ret["honesty_tier"], tier))
-    notes, touched = apply_reviews(problem, rid, ret, verdict, actor)
+        # The fence judges only what this worker could have written:
+        # uncommitted files outside its allowed paths, excluding every other
+        # run's directory. Committed history is never consulted, so nothing
+        # the Director or a sibling run commits can implicate this worker.
+        runs_prefix = (rel(problem / "runs", root) or "runs") + "/"
+        changed = dirty(root) - set(d.get("ignore") or [])
+        changed = {p for p in changed
+                   if not (p.startswith(runs_prefix)
+                           and not p.startswith(runs_prefix + rid + "/"))}
+        bad = outside(changed, d["allowed"])
+        if bad:
+            refuse("%s wrote outside its fence: %s. It was allowed %s and "
+                   "nothing else. The run is not filed. Recovery is a fresh "
+                   "dispatch with the fence stated in the brief, or `run.py "
+                   "ingest %s --record-broken` to file it as it stands."
+                   % (rid, ", ".join(bad), ", ".join(d["allowed"]), rid))
+
+        replayed, warnings, replay = do_replay(rundir, secs, ret, rid,
+                                               d["timeout"])
+        notes, touched = apply_reviews(problem, rid, ret, verdict, actor)
+    except SystemExit:
+        msg = claims.LAST_REFUSAL.get("message")
+        if msg:
+            (rundir / "refusal.txt").write_text(msg + "\n")
+        raise
 
     allocated = []
     for statement in ret["claims_proposed"]:
@@ -653,8 +861,10 @@ def cmd_ingest(args):
 
     body = ["**Run:** %s · **Actor:** %s · **Model:** %s · **Verdict:** %s"
             % (rid, actor, d["model"], verdict),
-            "**Honesty:** %s%s" % (tier, "" if tier == "machine-verified"
-                                   else " — " + "; ".join(warnings)),
+            "**Replayed:** %s%s" % ("yes" if replayed else "no",
+                                    "" if replayed and not warnings
+                                    else " — " + "; ".join(warnings)
+                                    if warnings else ""),
             "**Validation:** %s%s" % (ret["validation"],
                                       " — `%s`" % replay["command"] if replay else ""),
             "", "## Headline", "", ret["headline"], "", "## Markers checked", ""]
@@ -666,30 +876,36 @@ def cmd_ingest(args):
     body += ["", "## Leads", "", secs["leads"], "", "## Packet", "",
              "`%s/packet/RESULT.md` · `%s/packet/RETURN.json`"
              % (rel(rundir, root), rel(rundir, root))]
+    res = resource_line(problem, rid)
+    if res:
+        body += ["", "**Resources:** " + res]
     entry = file_entry(problem, ret["headline"],
                        "%s | %s | %s | %s" % (time.strftime("%Y-%m-%d", time.gmtime()),
                                               rid, verdict, ret["headline"]),
                        "\n".join(body))
 
     record = {"run": rid, "ts": now(), "actor": actor, "verdict": verdict,
-              "headline": ret["headline"], "honesty_tier": tier,
+              "headline": ret["headline"], "replayed": replayed,
+              "reviewed_by": [],
               "validation": ret["validation"], "replay": replay,
               "claims": [c for c, _ in allocated], "warnings": warnings,
               "entry": rel(entry, root), "reviewed": ret.get("reviewed") or []}
     write_json(rundir / "ingest.json", record)
     d.update(status="ingested", verdict=verdict, ingested_at=record["ts"],
-             honesty_tier=tier)
+             replayed=replayed)
     write_json(rundir / "dispatch.json", d)
     paths = [rel(rundir, root), rel(problem / "notebook", root)]
     paths += [rel(run_dir(problem, t), root) for t in touched]
-    commit(root, paths, "%s ingested: %s — %s" % (rid, verdict, ret["headline"]))
+    with ingest_lock(root):
+        commit(root, paths, "%s ingested: %s — %s" % (rid, verdict, ret["headline"]))
 
-    print("%s %s (%s)" % (rid, verdict, tier))
+    print("%s %s (replayed: %s)" % (rid, verdict, "yes" if replayed else "no"))
     for w in warnings + notes:
         print("- " + w)
     for cid, s in allocated:
         print("- %s proposed: %s" % (cid, claims.one_line(s)))
     print("Entry: %s" % rel(entry, root))
+    overdue_report(problem, skip={rid})
 
 
 # ---------------------------------------------------------------- note
@@ -732,8 +948,14 @@ def cmd_catchup(args):
             lines.append("%s dispatched to %s" % (rid, d["model"]))
         ing = ingest_record(problem, rid)
         if ing and ing["ts"] >= cutoff:
-            lines.append("%s %s (%s) — %s" % (rid, ing["verdict"],
-                                              ing["honesty_tier"], ing["headline"]))
+            tags = []
+            if ing.get("replayed"):
+                tags.append("replayed")
+            if ing.get("reviewed_by"):
+                tags.append("reviewed by %s" % ",".join(ing["reviewed_by"]))
+            lines.append("%s %s (%s) — %s"
+                         % (rid, ing["verdict"], "; ".join(tags) or "unchecked",
+                            ing["headline"]))
     print("\nRuns:")
     print("\n".join("  " + l for l in lines) if lines else "  nothing")
 
@@ -772,33 +994,176 @@ def cmd_catchup(args):
                  if (ingest_record(problem, rid) or {}).get("ts", "") > cut])
         print("\nSTATUS.md last changed %s; %d run(s) ingested since." % (cut, n))
 
+    catchup_lints(problem)
 
-# ---------------------------------------------------------------- check
 
-def cmd_check(args):
-    problem = find_problem(args.problem)
-    known, _ = claims.load(problem)
-    flags = []
-    for rid, d in all_runs(problem):
+def catchup_lints(problem):
+    """The standing lints, printed with every catchup so orientation and
+    housekeeping are one report. Every line here is closable — an unclosable
+    flag teaches its reader to skim — and the chronic are aggregated, never
+    listed one per line."""
+    known, order = claims.load(problem)
+    runs = all_runs(problem)
+    print("\nAttention:")
+    lines = []
+
+    owed = []
+    for rid, d in runs:
         ing = ingest_record(problem, rid)
-        if d["status"] == "open":
-            flags.append("%s is still open — dispatched %s to %s and never "
-                         "ingested." % (rid, d["ts"], d["model"]))
-        if ing and ing.get("validation") == "review" and \
-                ing["honesty_tier"] != "hand-checked":
-            flags.append("%s declared a review and no referee has done it, so "
-                         "it stays asserted. Dispatch a referee whose "
-                         "RETURN.json lists %s in `reviewed`." % (rid, rid))
-        for c in d.get("claims_pasted") or []:
-            if c not in known:
-                flags.append("%s pasted %s into its brief, and that is not a "
-                             "claim in this ledger." % (rid, c))
-    if flags:
-        print("%d thing(s) to look at:" % len(flags))
-        for f in flags:
-            print("- " + f)
+        if (ing and ing.get("validation") == "review"
+                and not ing.get("reviewed_by")
+                and not ing.get("review_waived")
+                and ing.get("verdict") in ("PASS", "FAIL", "UNDECIDED")):
+            owed.append(rid)
+    if owed:
+        lines.append("%d run(s) owe a review (oldest %s) — dispatch a referee "
+                     "whose RETURN.json lists the run in `reviewed`, or "
+                     "`run.py waive-review <run> --reason ...`"
+                     % (len(owed), owed[0]))
+
+    dupes = []
+    for rid, d in runs:
+        ing = ingest_record(problem, rid)
+        for w in (ing or {}).get("warnings") or []:
+            m = re.match(r"(C-\d+) looks close to", w)
+            if m and known.get(m.group(1), {}).get("status") == "proposed":
+                dupes.append("%s (%s): %s" % (m.group(1), rid, w))
+    if dupes:
+        lines.append("%d duplicate warning(s) unresolved — promote, supersede "
+                     "or refute the claim to clear each:" % len(dupes))
+        lines += ["  " + x for x in dupes[:8]]
+        if len(dupes) > 8:
+            lines.append("  ... and %d more" % (len(dupes) - 8))
+
+    shaky = []
+    for cid in order:
+        c = known[cid]
+        if c["status"] != "verified":
+            continue
+        for r in c.get("rests_on") or []:
+            st = known.get(r, {}).get("status", "missing")
+            if st != "verified":
+                shaky.append("%s rests on %s [%s]" % (cid, r, st))
+    if shaky:
+        lines.append("%d verified claim(s) rest on something not verified:"
+                     % len(shaky))
+        lines += ["  " + x for x in shaky[:8]]
+
+    accepted = [cid for cid in order
+                if known[cid]["status"] == "accepted-by-investigator"]
+    if accepted:
+        lines.append("accepted on the Investigator's word, not proved: %s"
+                     % ", ".join(accepted))
+
+    weak = [cid for cid in order
+            if known[cid]["status"] == "verified"
+            and str(known[cid].get("independence") or "").startswith("none")]
+    if weak:
+        lines.append("verified with no model independence (candidates for a "
+                     "stronger referee): %s" % ", ".join(weak))
+
+    if lines:
+        for l in lines:
+            print("  " + l)
     else:
-        print("Nothing to flag in %d run(s)." % len(all_runs(problem)))
+        print("  nothing")
+
+    # Per-model totals: runs, ingested, refused, wall time, tokens.
+    per = {}
+    for rid, d in runs:
+        m = d.get("model") or "?"
+        row = per.setdefault(m, {"runs": 0, "ingested": 0, "refused": 0,
+                                 "wall": 0, "tokens": ""})
+        row["runs"] += 1
+        if d.get("status") == "ingested":
+            row["ingested"] += 1
+        elif d.get("status") in ("uningestable", "harness-failure"):
+            row["refused"] += 1
+        e = execution_record(problem, rid)
+        if e and e.get("wall_seconds"):
+            row["wall"] += e["wall_seconds"]
+    if per:
+        print("\nPer model:")
+        for m in sorted(per):
+            r = per[m]
+            print("  %-40s %3d run(s), %d ingested, %d refused, %dm wall"
+                  % (m, r["runs"], r["ingested"], r["refused"],
+                     r["wall"] // 60))
+
+
+# ------------------------------------------------------- void, lint, waive
+
+def cmd_void(args):
+    """Close a run that produced nothing. Not for packets — those are filed
+    with --record-broken — but for the run that never launched, the worker
+    that died silent, the dispatch a fresh run superseded."""
+    problem = find_problem(args.problem)
+    root = git_root(problem)
+    rid = args.run
+    d = load_dispatch(problem, rid)
+    packet = run_dir(problem, rid) / "packet"
+    if (packet / "RESULT.md").exists() or (packet / "RETURN.json").exists():
+        refuse("%s has a packet. Ingest it, or file it with `run.py ingest %s "
+               "--record-broken` — void is only for runs that produced "
+               "nothing." % (rid, rid))
+    d.update(status="void", verdict="VOID", ingested_at=now(),
+             void_reason=args.reason)
+    write_json(run_dir(problem, rid) / "dispatch.json", d)
+    entry = file_entry(problem, "%s voided: %s" % (rid, args.reason),
+                       "%s | %s | VOID | %s"
+                       % (time.strftime("%Y-%m-%d", time.gmtime()), rid,
+                          args.reason[:80]),
+                       "**Run:** %s · **Verdict:** VOID\n\n%s\n\nNo packet "
+                       "was produced and no claims were allocated."
+                       % (rid, args.reason))
+    commit(root, [rel(run_dir(problem, rid), root),
+                  rel(problem / "notebook", root)],
+           "%s VOID: %s" % (rid, args.reason[:60]))
+    print("%s voided. Entry: %s" % (rid, rel(entry, root)))
+
+
+def cmd_lint(args):
+    """Read-only packet contract check. Workers run it before finishing;
+    anyone may run it any time. Prints what is wrong, changes nothing."""
+    problem = find_problem(args.problem)
+    rid = args.run
+    p = run_dir(problem, rid) / "dispatch.json"
+    if not p.exists():
+        refuse("there is no run %s under %s/runs." % (rid, problem.name))
+    d = json.loads(p.read_text())
+    packet = run_dir(problem, rid) / "packet"
+    first = ""
+    result = packet / "RESULT.md"
+    if result.exists():
+        first = next((l for l in result.read_text().splitlines()
+                      if l.strip()), "")
+    if "PENDING" in first:
+        print("RESULT.md is still PENDING — the worker has not finished. "
+              "The contract below applies to the finished packet.")
+    try:
+        read_packet(problem, rid, d)
+    except SystemExit:
+        print("The packet does not pass the contract yet (reason above).")
+        return
+    print("%s: packet passes the contract." % rid)
+
+
+def cmd_waive_review(args):
+    """An owed review that will not happen, with the reason on record. This
+    is what clears the 'reviews owed' line in catchup — an unclosable flag
+    teaches its reader to skim, which is how R-001's owed referee was flagged
+    for three days and never dispatched."""
+    problem = find_problem(args.problem)
+    root = git_root(problem)
+    rid = args.run
+    rec = ingest_record(problem, rid)
+    if rec is None:
+        refuse("%s has no ingest record, so there is no review to waive." % rid)
+    rec["review_waived"] = args.reason
+    write_json(run_dir(problem, rid) / "ingest.json", rec)
+    commit(root, [rel(run_dir(problem, rid), root)],
+           "%s review waived: %s" % (rid, args.reason[:60]))
+    print("%s: review waived — %s" % (rid, args.reason))
 
 
 # ---------------------------------------------------------------- cli
@@ -824,9 +1189,28 @@ def main(argv=None):
     i = sub.add_parser("ingest", help="file a returned packet")
     i.add_argument("run")
     i.add_argument("--record-broken", action="store_true",
-                   help="file an ungateable packet as it stands, verdict "
-                        "UNINGESTABLE, allocating no claims")
+                   help="file the failure as it stands: UNINGESTABLE when a "
+                        "packet exists, HARNESS-FAILURE when none does; the "
+                        "recorded reason goes in the entry, no claims")
+    i.add_argument("--worker-done", action="store_true",
+                   help="ingest even though execution.json says the worker "
+                        "process is still alive")
     i.set_defaults(func=cmd_ingest)
+
+    v = sub.add_parser("void", help="close a run that produced nothing")
+    v.add_argument("run")
+    v.add_argument("--reason", required=True)
+    v.set_defaults(func=cmd_void)
+
+    l = sub.add_parser("lint", help="read-only packet contract check")
+    l.add_argument("run")
+    l.set_defaults(func=cmd_lint)
+
+    w = sub.add_parser("waive-review", help="record that an owed review "
+                                            "will not happen")
+    w.add_argument("run")
+    w.add_argument("--reason", required=True)
+    w.set_defaults(func=cmd_waive_review)
 
     t = sub.add_parser("note", help="file a Director-written notebook entry")
     t.add_argument("--headline", required=True)
@@ -839,10 +1223,7 @@ def main(argv=None):
     c.add_argument("since", help="a commit, or YYYY-MM-DD")
     c.set_defaults(func=cmd_catchup)
 
-    k = sub.add_parser("check", help="advisory lint; never fails")
-    k.set_defaults(func=cmd_check)
-
-    for q in (n, i, t, c, k):
+    for q in (n, i, t, c, v, l, w):
         q.add_argument("--problem", help="the problem directory (default: found "
                                          "by walking up from here)")
     args = p.parse_args(argv)
