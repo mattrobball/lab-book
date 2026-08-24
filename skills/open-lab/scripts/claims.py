@@ -17,12 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 STATUSES = ["proposed", "conditional", "verified", "externally-established",
-            "refuted", "superseded"]
+            "accepted-by-investigator", "refuted", "superseded"]
 MOVES = {
     "proposed": {"conditional", "verified", "externally-established",
-                 "refuted", "superseded"},
+                 "accepted-by-investigator", "refuted", "superseded"},
     "conditional": {"verified", "proposed", "refuted", "superseded"},
     "externally-established": {"conditional", "proposed", "refuted", "superseded"},
+    "accepted-by-investigator": {"proposed", "refuted", "superseded"},
     "verified": {"proposed", "refuted", "superseded"},
     "refuted": set(),
     "superseded": set(),
@@ -34,7 +35,11 @@ HEADING = re.compile(r"^## +(.+?)\s*$", re.M)
 COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
+LAST_REFUSAL = {"message": None}
+
+
 def refuse(message):
+    LAST_REFUSAL["message"] = message
     sys.stderr.write("Refused: " + message + "\n")
     raise SystemExit(2)
 
@@ -98,6 +103,7 @@ def load(problem):
                            "discoverer": rec["actor"], "statement": rec["statement"],
                            "conditions": rec["conditions"], "rests_on": rec["rests_on"],
                            "hash": rec["hash"], "evidence": None, "confirmed_by": None,
+                           "independence": None,
                            "superseded_by": None, "history": [rec]}
             order.append(cid)
         else:
@@ -109,8 +115,13 @@ def load(problem):
                 c["evidence"], c["confirmed_by"] = None, None
             if rec.get("evidence"):
                 c["evidence"] = rec["evidence"]
-            if rec["to"] in ("verified", "externally-established"):
+            if rec["to"] in ("verified", "externally-established",
+                             "accepted-by-investigator"):
                 c["confirmed_by"] = rec["actor"]
+            if rec.get("independence"):
+                c["independence"] = rec["independence"]
+            if rec.get("rests_on") is not None:
+                c["rests_on"] = rec["rests_on"]
             c["superseded_by"] = rec.get("by") or c["superseded_by"]
             c["history"].append(rec)
     return claims, order
@@ -164,6 +175,8 @@ def view_text(c):
              "**Status:** %s" % c["status"],
              "**Discovered by:** %s" % c["discoverer"],
              "**Confirmed by:** %s" % (c["confirmed_by"] or "—")]
+    if c.get("independence"):
+        lines.append("**Independence:** %s" % c["independence"])
     if c["superseded_by"]:
         lines.append("**Superseded by:** %s" % c["superseded_by"])
     lines += ["", "## Statement", "", c["statement"].strip(), "",
@@ -221,6 +234,57 @@ def commit(problem, message):
 
 # ---------------------------------------------------------------- evidence
 
+def run_model(problem, run_id):
+    p = problem / "runs" / run_id / "dispatch.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text()).get("model")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def provider(model):
+    """Crude on purpose: the goal is 'same house or not', not taxonomy."""
+    if not model:
+        return None
+    m = model.lower()
+    for prefix, name in (("gpt", "openai"), ("codex", "openai"), ("o1", "openai"),
+                         ("claude", "anthropic"), ("grok", "xai"),
+                         ("gemini", "google")):
+        if m.startswith(prefix):
+            return name
+    return m.split("/")[0] if "/" in m else m
+
+
+def discovering_run(problem, cid):
+    """The run whose ingest allocated this claim, if any run did."""
+    runs = problem / "runs"
+    if not runs.is_dir():
+        return None
+    for d in sorted(runs.iterdir()):
+        rec = d / "ingest.json"
+        if rec.exists():
+            try:
+                if cid in (json.loads(rec.read_text()).get("claims") or []):
+                    return d.name
+            except (json.JSONDecodeError, OSError):
+                continue
+    return None
+
+
+def dependents(claims, cid):
+    """Every claim resting on cid, transitively."""
+    out, frontier = [], [cid]
+    while frontier:
+        target = frontier.pop()
+        for other, c in claims.items():
+            if target in (c.get("rests_on") or []) and other not in out:
+                out.append(other)
+                frontier.append(other)
+    return sorted(out)
+
+
 def run_on_record(problem, run_id):
     for cand in (problem / "runs" / run_id / "RETURN.json",
                  problem / "runs" / run_id / "packet" / "RETURN.json"):
@@ -262,7 +326,7 @@ def cmd_set(args):
     claims, _ = load(problem)
     cid, target = args.claim, args.status
     if target not in STATUSES:
-        refuse("%s is not one of the six statuses. Use one of: %s."
+        refuse("%s is not one of the statuses. Use one of: %s."
                % (target, ", ".join(STATUSES)))
     if cid not in claims:
         refuse("%s is not a claim in this ledger. Run `claims.py check` to see "
@@ -303,6 +367,37 @@ def cmd_set(args):
                    "found a result never confirms it. Have a different actor "
                    "check the statement in its own run, and pass that actor to "
                    "--actor." % (cid, c["discoverer"], args.actor))
+        ev_model = run_model(problem, evidence)
+        disc_run = discovering_run(problem, cid)
+        disc_model = run_model(problem, disc_run) if disc_run else None
+        if ev_model and disc_model:
+            if ev_model == disc_model and not args.accept_same_model:
+                refuse("the evidence run %s ran on %s — the same model that "
+                       "discovered %s (%s). A model checking its own kind of "
+                       "mistake is weak evidence. Prefer a different model; to "
+                       "proceed anyway, pass --accept-same-model and the claim "
+                       "will record Independence: none." % (evidence, ev_model,
+                                                           cid, disc_run))
+            if ev_model == disc_model:
+                independence = "none (same model, %s)" % ev_model
+            elif provider(ev_model) == provider(disc_model):
+                independence = "partial (same provider: %s vs %s)" % (disc_model,
+                                                                     ev_model)
+                print("Warning: discoverer and checker share a provider "
+                      "(%s). Recorded as partial independence." % provider(ev_model))
+            else:
+                independence = "full (%s checked %s)" % (ev_model, disc_model)
+        else:
+            independence = "unknown (models not on record)"
+        if args.rests_on is None and c["rests_on"]:
+            print("Note: %s keeps its recorded dependencies: %s. Pass "
+                  "--rests-on to change them." % (cid, ", ".join(c["rests_on"])))
+        elif args.rests_on is None:
+            refuse("verifying %s needs --rests-on: name the claim IDs its "
+                   "proof depends on, or say --rests-on none. When a "
+                   "dependency later falls, this is how its dependents are "
+                   "found — the one hunt this lab has done by hand took four "
+                   "hours." % cid)
         if old == "conditional":
             bad = []
             for r in c["rests_on"]:
@@ -313,6 +408,17 @@ def cmd_set(args):
                 refuse("%s rests on %s, so it cannot be verified yet. Verify "
                        "what it rests on first, or leave %s conditional."
                        % (cid, "; ".join(bad), cid))
+    elif target == "accepted-by-investigator":
+        if not evidence:
+            refuse("accepting %s on the Investigator's word still needs "
+                   "--evidence saying why and when, e.g. \"Investigator "
+                   "instruction 2026-08-23: take Steen's theorem as proved; "
+                   "thesis embargoed\". The decision is the evidence, and it "
+                   "must be on the record." % cid)
+        if RUN_ID.match(evidence):
+            refuse("%s is a run. accepted-by-investigator records a decision, "
+                   "not a run — describe the instruction in --evidence, or set "
+                   "the claim verified with that run instead." % evidence)
     elif target == "externally-established":
         if not evidence:
             refuse("recording %s as externally-established needs --evidence with "
@@ -336,6 +442,21 @@ def cmd_set(args):
                    "Allocate the replacement with `claims.py new` first, then "
                    "supersede %s with --by <new ID>." % (args.by, cid, cid))
 
+    rests = None
+    if getattr(args, "rests_on", None) is not None:
+        rests = []
+        for chunk in args.rests_on:
+            rests += [x.strip() for x in chunk.split(",") if x.strip()]
+        if rests == ["none"]:
+            rests = []
+        for r in rests:
+            if not CLAIM_ID.match(r):
+                refuse("%s is not a claim ID. Use IDs like C-004, or the word "
+                       "none." % r)
+            if r not in claims:
+                refuse("%s rests on %s, which is not a claim in this ledger."
+                       % (cid, r))
+
     view = sections(problem / "claims" / (cid + ".md"))
     statement = view.get("statement", c["statement"]).strip() or c["statement"]
     conditions = view.get("conditions", c["conditions"]).strip()
@@ -344,14 +465,26 @@ def cmd_set(args):
     if statement != c["statement"] or conditions != c["conditions"]:
         print("Note: the statement or conditions in %s.md differ from the "
               "ledger. Recording the file's wording as the claim's text." % cid)
-    append(problem, {"event": "set", "id": cid, "ts": now(), "actor": args.actor,
-                     "from": old, "to": target, "evidence": evidence or None,
-                     "by": args.by, "statement": statement, "conditions": conditions,
-                     "hash": text_hash(statement, conditions)})
+    rec = {"event": "set", "id": cid, "ts": now(), "actor": args.actor,
+           "from": old, "to": target, "evidence": evidence or None,
+           "by": args.by, "statement": statement, "conditions": conditions,
+           "hash": text_hash(statement, conditions)}
+    if target == "verified":
+        rec["independence"] = independence
+    if rests is not None:
+        rec["rests_on"] = rests
+    append(problem, rec)
     regenerate(problem)
     tail = " (%s)" % evidence if evidence else (" (by %s)" % args.by if args.by else "")
     commit(problem, "%s %s -> %s%s" % (cid, old, target, tail))
     print("%s %s -> %s" % (cid, old, target))
+    if target in ("refuted", "superseded", "proposed"):
+        hit = dependents(claims, cid)
+        if hit:
+            print("Standing on %s, review each: %s" % (cid, ", ".join(hit)))
+            for h in hit:
+                print("  %s [%s] — %s" % (h, claims[h]["status"],
+                                          one_line(claims[h]["statement"])))
 
 
 def cmd_check(args):
@@ -402,8 +535,16 @@ def main(argv=None):
     s = sub.add_parser("set", help="change a claim's status")
     s.add_argument("claim")
     s.add_argument("status", help="one of: " + ", ".join(STATUSES))
-    s.add_argument("--evidence", help="an ingested run ID, or a citation")
+    s.add_argument("--evidence", help="an ingested run ID, a citation, or for "
+                                      "accepted-by-investigator the decision")
     s.add_argument("--by", help="for superseded: the claim that replaces this one")
+    s.add_argument("--rests-on", action="append", dest="rests_on",
+                   help="claim IDs this one's proof depends on (or: none); "
+                        "required when verifying a claim with none recorded")
+    s.add_argument("--accept-same-model",
+                   action="store_true",
+                   help="allow evidence from the same model that discovered "
+                        "the claim; recorded as Independence: none")
     s.set_defaults(func=cmd_set)
 
     c = sub.add_parser("check", help="advisory lint; never fails")

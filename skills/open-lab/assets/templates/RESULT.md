@@ -1,5 +1,10 @@
 # VERDICT: <PASS | FAIL | UNDECIDED>
 
+<!-- Create this file first, with the first line `# VERDICT: PENDING`,
+     and fill the sections in as you work. Replace PENDING with the real
+     verdict as your last act; a packet still reading PENDING cannot be
+     ingested. -->
+
 <One sentence: what happened. No hedging, no summary of the brief.>
 
 ## What was done

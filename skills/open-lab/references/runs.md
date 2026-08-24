@@ -37,6 +37,21 @@ missed and strikes what does not apply. What survives enters the ledger as
 `externally-established` claims with their citations, so later briefs paste
 facts, not folklore.
 
+## Sources
+
+The problem's `sources/` directory is to literature what `tools/` is to code:
+where reusable retrieval work is promoted so it is done once. Cache what can
+lawfully be cached, record each file's SHA-256 in `sources/MANIFEST.md`, and
+index the lot in STATUS.md under "Sources held here". `sources/QUERIES.md` is
+the append-only log of searches: what was asked, where, what came back, what
+was kept — literature runs append to it, briefs paste from it. A source that
+cannot be obtained gets a manifest line, not a claim: what it is, what was
+tried, and "do not retry unless ..." — the reference run re-litigated one
+embargoed thesis across four runs for want of that line. A not-found result
+("no published proof of X exists") lives in QUERIES.md with its trail, and
+becomes a claim only if the trail would convince a skeptic — mathematical
+impossibility results are ordinary claims and untouched by this rule.
+
 ## Dispatching
 
 Dispatch when you can state the goal and a worker with no context could tell
@@ -54,6 +69,15 @@ the Update step, headed by one line: what it does, which run built it. "Tools
 built here" in `STATUS.md` indexes that directory, and a brief may allow
 reading `tools/` instead of pasting scripts in.
 
+A check is dispatched as an attack, in the brief's own words: "A claims X;
+review the claim adversarially but fairly — your job is to prove or refute
+it. A refutation with an explicit witness is full success. A PASS must name
+what you attacked and could not break." If the claim rests on computation,
+the checker writes its own verifier and never runs or trusts A's. This
+framing is what makes a second opinion evidence: the checks in the reference
+run that read the discoverer's proof passed its false step; the ones that
+attacked the statement caught it.
+
 **Every dispatch names a model**, from `lab.json` or stated explicitly.
 `run.py new` refuses without one. It allocates the run ID, records
 `dispatch.json` (brief fingerprint, model, launch command, replay timeout, the
@@ -67,14 +91,22 @@ new` has written an `AGENTS.md` holding worker rules only — so the Director
 charter at the repository root is unreachable. Workers that marinate in lab
 governance start editing it.
 
-Several workers at once is fine as long as each has its own write fence and
-each brief names the others' directories off-limits.
+Several workers at once is the normal mode, and the machinery is built for
+it: the fence judges each worker only by what it could itself have written,
+ingest takes a lock, and a run whose worker is still alive is not ingested.
+Each brief still names the other runs' directories off-limits. Launch
+commands should invoke the tool directly by absolute path — login shells
+(`bash -lc`) read profile files and have broken under sandboxes; `run.py new`
+refuses a command whose binary is not on PATH, because a launch that cannot
+start is a harness failure, not a run.
 
 ## The return packet
 
 The worker writes two files into its run's `packet/`.
 
-`RESULT.md` — first line `# VERDICT: PASS|FAIL|UNDECIDED`, a headline sentence,
+`RESULT.md` — created first with `# VERDICT: PENDING` and filled in as the
+worker goes, so a death mid-task leaves partial findings instead of nothing;
+finished, its first line is `# VERDICT: PASS|FAIL|UNDECIDED`, a headline sentence,
 then `## What was done`, `## Not claimed`, `## Leads`, `## Validation`.
 `## Not claimed` is graded: a narrow honest boundary beats a loud headline.
 `## Leads` is the worker's strategy, with reasons — what it dropped and why,
@@ -82,14 +114,23 @@ what looked promising, what it would try next. Dead ends die here or get
 retried forever.
 
 `RETURN.json` — `headline`, `exits` (the states reached), `validation`
-(`replay` or `review`), `machine_markers`, `honesty_tier` (`machine-verified`,
-`hand-checked`, `asserted`), `claims_used` (IDs copied from the brief), and
-`claims_proposed` — **plain statements, never IDs**. Workers do not mint claim
-IDs, and do not name themselves: ingest stamps the actor from `dispatch.json`.
+(`replay` or `review`), `machine_markers`, `claims_used` (IDs copied from the
+brief), and `claims_proposed` — **plain statements, never IDs**. Workers do
+not mint claim IDs, do not grade themselves, and do not name themselves:
+ingest stamps the actor from `dispatch.json`. Before finishing, a worker runs
+`run.py lint R-NNN` — read-only — and does not stop until the packet passes.
 
 ## Replay or review
 
-Every return declares which of the two validated it.
+Every return declares which of the two validated it. They are separate facts,
+never a ladder: `replayed` says a machine re-ran it clean, `reviewed_by` says
+who checked it, and a refereed proof is not below a passing script. And be
+precise about what a replay proves: a marker is a print statement — its
+presence proves the command ran, not that anything was recomputed. The
+reference run's worst moment was a replay that validated shapes and its own
+checksum while recomputing nothing; the referee that caught it was checking
+what the replay actually recomputes, which is now the standing instruction
+for every referee of computational work.
 
 **Replay** — a machine re-runs the work: the exact command, the exact marker
 strings it prints, and what it prints when it fails. The timeout is set at
@@ -106,18 +147,27 @@ then dispatch that referee: a review nobody has done validates nothing.
 runs the command under the dispatched timeout: a nonzero exit fails whatever
 was printed, and every marker must appear exactly as written, not paraphrased
 and not matched by pattern. Ingest stamps the actor from `dispatch.json`,
-checks the write fence, renders the notebook entry, warns when a proposed claim
-looks like one already on file, and commits the run with the verdict in the
-message.
+checks the write fence — judging only uncommitted files this worker could
+have written, never committed history or another run's directory — renders
+the notebook entry, warns when a proposed claim looks like one already on
+file, and commits the run under a lock, with the verdict in the message. A
+run whose worker process is still alive is refused until it exits (or
+`--worker-done` overrides), because a live worker writing into a filed packet
+is a mutation nobody can audit.
 
-What lands on record follows: a replay that passed is machine-verified, a
-review by a different actor is hand-checked, neither is asserted. A review
-lifts asserted to hand-checked; it never overwrites a tier a replay earned.
-
-A packet that cannot be ingested is committed as it stands under the verdict
-`UNINGESTABLE`, allocating no claims. Packets are never hand-edited — a
-Director who repairs a worker's return has laundered its provenance. Recovery
-is a fresh dispatch.
+Every refusal saves its reason to the run's `refusal.txt`. Filing the failure
+is then one command with two honest verdicts: `ingest R-NNN --record-broken`
+files `UNINGESTABLE` when a packet exists and failed a named gate, and
+`HARNESS-FAILURE` when the worker never produced one — the recorded reason
+and `execution.json`'s exit code go in the entry either way, and whatever the
+packet proposed is quoted there as untrusted text, so a refusal never
+silently destroys a lead. A pure format failure may be bounced once: re-run
+the same worker with the refusal text as its prompt (the launch command is in
+`execution.json`) — the same actor repairing its own return launders nothing.
+Fence and content failures are never bounced. Packets are never hand-edited —
+a Director who repairs a worker's return has laundered its provenance.
+Recovery is a fresh dispatch. A run that produced nothing at all is closed
+with `run.py void R-NNN --reason`, so the open list never carries ghosts.
 
 Ingest never promotes a claim. It files proposals as `proposed` and stops.
 Promotion is your separate act, under `references/claims.md`, never on the strength of
@@ -133,8 +183,26 @@ Investigator. Without it the only thinking on record is a worker's.
 ## Catchup
 
 `run.py catchup` lists the runs, verdicts, and claim changes since a commit or
-a date. It gives you the raw change; you tell the Investigator what it means,
-in plain sentences, without pasting the listing.
+a date, then the standing lints: runs needing attention, reviews owed
+(aggregated, cleared by a referee or `run.py waive-review`), unresolved
+duplicate-claim warnings, verified claims resting on unverified ones, claims
+accepted on the Investigator's word, promotions with no model independence,
+and per-model totals of runs, ingests, refusals and wall time. Every line is
+closable — a flag nobody can clear teaches its reader to skim, which is how
+an owed referee stayed flagged for three days and was never dispatched. You
+tell the Investigator what it means, in plain sentences, without pasting the
+listing. `new` and `ingest` also end by naming any run that needs attention,
+so a stalled run cannot hide behind a report nobody asks for.
+
+## Resource accounting
+
+`execution.json` in each run directory records the launch command, start and
+end, exit code, wall time, and — best effort, via an optional `usage_pattern`
+regex per role in `lab.json` — tokens and cost from the worker's log. Missing
+numbers stay missing, never guessed. Each notebook entry ends with the run's
+resource line, and catchup's per-model totals answer "is this model earning
+its place" at a glance. What a theorem cost is a grep away: its claims name
+their evidence runs, and the entries carry the footers.
 
 ## The honest stop
 

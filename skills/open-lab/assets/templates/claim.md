@@ -7,6 +7,8 @@
 **Status:** <set by claims.py>
 **Discovered by:** <actor, set at allocation>
 **Confirmed by:** <a different actor, set on promotion>
+**Independence:** <set on verification: full / partial (same provider) /
+none (same model, allowed but never preferred)>
 
 ## Statement
 

@@ -288,35 +288,37 @@ class TestHonestyTier(LabCase):
         self.packet(rid, marker="NEVER_PRINTED_OK",
                     command="printf '%s\\n' SOMETHING_ELSE")
         r = self.ok("ingest", rid)
-        self.assertIn("asserted", r.stdout)
+        self.assertIn("replayed: no", r.stdout)
         self.assertIn("never printed", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
 
     def test_nonzero_exit_is_asserted_even_with_markers(self):
         rid, _ = self.dispatch()
         self.packet(rid, command="printf '%s\\n' CHECK_OK; exit 3")
         r = self.ok("ingest", rid)
         self.assertIn("exited 3", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
 
-    def test_clean_replay_is_machine_verified(self):
+    def test_clean_replay_is_recorded(self):
         rid, _ = self.dispatch()
         self.packet(rid)
         r = self.ok("ingest", rid)
-        self.assertIn("machine-verified", r.stdout)
+        self.assertIn("replayed: yes", r.stdout)
         rec = self.ingest_json(rid)
-        self.assertEqual(rec["honesty_tier"], "machine-verified")
+        self.assertIs(rec["replayed"], True)
         self.assertEqual(rec["replay"]["exit"], 0)
         self.assertEqual(rec["warnings"], [])
 
-    def test_worker_tier_is_not_believed(self):
+    def test_worker_self_grade_is_ignored(self):
+        """Whatever a worker says about its own standing is not read at all:
+        replayed is computed here, from the replay alone."""
         rid, _ = self.dispatch()
         self.packet(rid, marker="NEVER_PRINTED_OK",
                     command="printf '%s\\n' SOMETHING_ELSE",
                     ret={"honesty_tier": "machine-verified"})
         r = self.ok("ingest", rid)
-        self.assertIn("the worker reported machine-verified", r.stdout)
-        self.assertEqual(self.ingest_json(rid)["honesty_tier"], "asserted")
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
+        self.assertNotIn("machine-verified", r.stdout)
 
     def test_review_is_asserted_until_a_referee_run_checks_it(self):
         first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
@@ -324,38 +326,34 @@ class TestHonestyTier(LabCase):
                                       "induction step for n = 4.",
                     ret={"validation": "review", "machine_markers": []})
         r = self.ok("ingest", first)
-        self.assertIn("asserted", r.stdout)
-        self.assertIn("no referee run has checked this yet", r.stdout)
-        self.assertIn("%s declared a review" % first, self.ok("check").stdout)
+        self.assertIn("replayed: no", r.stdout)
+        self.assertIn("no referee run has checked", r.stdout)
+        self.assertIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
 
         second, _ = self.dispatch(self.brief("Referee %s." % first, "b2.md"),
                                   extra=["--model", "worker-b"])
         self.packet(second, headline="The induction step holds.",
                     ret={"reviewed": [first]})
         self.ok("ingest", second)
-        self.assertEqual(self.ingest_json(first)["honesty_tier"], "hand-checked")
         self.assertEqual(self.ingest_json(first)["reviewed_by"], [second])
-        self.assertEqual(self.dispatch_json(first)["honesty_tier"], "hand-checked")
-        self.assertNotIn("declared a review", self.ok("check").stdout)
+        self.assertNotIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
 
-    def test_a_review_never_overwrites_machine_verified(self):
-        """A replay this lab ran outranks a referee reading the work: the
-        review is recorded, the tier it earned is left alone."""
+    def test_replay_and_review_are_separate_facts(self):
+        """Not a ladder: a replayed run that also gets reviewed records both,
+        and neither rewrites the other."""
         first, _ = self.dispatch(self.brief("Count them.", "b1.md"))
         self.packet(first)
         self.ok("ingest", first)
-        self.assertEqual(self.ingest_json(first)["honesty_tier"], "machine-verified")
+        self.assertIs(self.ingest_json(first)["replayed"], True)
 
         second, _ = self.dispatch(self.brief("Referee %s." % first, "b2.md"),
                                   extra=["--model", "worker-b"])
         self.packet(second, headline="The count holds.", ret={"reviewed": [first]})
         r = self.ok("ingest", second)
-        self.assertIn("stays machine-verified", r.stdout)
-        self.assertIn("never overwrites a tier a replay earned", r.stdout)
+        self.assertIn("reviewed by %s" % second, r.stdout)
         rec = self.ingest_json(first)
-        self.assertEqual(rec["honesty_tier"], "machine-verified")
+        self.assertIs(rec["replayed"], True)
         self.assertEqual(rec["reviewed_by"], [second])
-        self.assertEqual(self.dispatch_json(first)["honesty_tier"], "machine-verified")
 
     def test_a_referee_with_the_same_actor_is_refused(self):
         first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
@@ -386,7 +384,7 @@ class TestSpine(LabCase):
                          "claims_proposed": ["The largest cap in AG(4,3) has 20 "
                                              "points."]})
         r = self.ok("ingest", rid)
-        self.assertIn("R-001 PASS (machine-verified)", r.stdout)
+        self.assertIn("R-001 PASS (replayed: yes)", r.stdout)
 
         # The proposed claim went through the ledger, as proposed, credited to
         # the actor dispatch stamped — never to the worker's own say-so.
@@ -401,7 +399,7 @@ class TestSpine(LabCase):
         self.assertEqual(len(self.entries()), 1)
         entry = (self.problem / "notebook" / "entries" / self.entries()[0]).read_text()
         self.assertIn("**Verdict:** PASS", entry)
-        self.assertIn("machine-verified", entry)
+        self.assertIn("**Replayed:** yes", entry)
         self.assertIn("CHECK_OK", entry)
         self.assertIn("Dropped the greedy order", entry)      # Leads, verbatim
         self.assertIn("C-002", entry)
@@ -414,7 +412,7 @@ class TestSpine(LabCase):
         self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
 
         cat = self.ok("catchup", "2020-01-01").stdout
-        self.assertIn("R-001 PASS (machine-verified)", cat)
+        self.assertIn("R-001 PASS (replayed)", cat)
         self.assertIn("C-002 stated as proposed", cat)
         self.assertIn("Still open:\n  nothing", cat)
         self.assertIn("run(s) ingested since", cat)
@@ -443,12 +441,13 @@ class TestSpine(LabCase):
         self.assertIn("looks close to C-001", r.stdout)
         self.assertIn("C-002", r.stdout)
 
-    def test_check_flags_an_open_run(self):
+    def test_open_runs_listed_by_catchup(self):
         rid, _ = self.dispatch()
-        self.assertIn("%s is still open" % rid, self.ok("check").stdout)
+        self.assertIn(rid, self.ok("catchup", "2020-01-01").stdout)
         self.packet(rid)
         self.ok("ingest", rid)
-        self.assertIn("Nothing to flag", self.ok("check").stdout)
+        self.assertIn("Still open:\n  nothing",
+                      self.ok("catchup", "2020-01-01").stdout)
 
     def test_refuses_outside_a_git_repo(self):
         loose = Path(tempfile.mkdtemp(prefix="nogit-"))
@@ -458,6 +457,208 @@ class TestSpine(LabCase):
         err = self.refused("new", "--brief", str(loose / "b.md"), "--model", "m",
                            "--no-launch", cwd=loose)
         self.assertIn("git", err)
+
+
+class TestParallelFence(LabCase):
+    """The fence judges what this worker could have written, never what the
+    Director or a sibling run did while it worked."""
+
+    def test_director_commits_do_not_implicate_a_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        # The Director rewrites belief documents mid-flight, any subject line.
+        (self.problem / "STATUS.md").write_text("# Status: demo\n\nRewritten.\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m",
+            "Reduce remaining classification to three proof gates")
+        self.ok("ingest", rid)
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_sibling_run_dirt_does_not_implicate_a_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        sibling = self.problem / "runs" / "R-099" / "packet"
+        sibling.mkdir(parents=True)
+        (sibling / "scratch.py").write_text("pass\n")     # uncommitted
+        self.ok("ingest", rid)
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_a_real_escape_is_still_caught_and_the_reason_kept(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        (self.problem / "stray.txt").write_text("worker was here\n")
+        err = self.refused("ingest", rid)
+        self.assertIn("wrote outside its fence", err)
+        self.assertIn("stray.txt", err)
+        refusal = self.problem / "runs" / rid / "refusal.txt"
+        self.assertTrue(refusal.exists())
+        self.assertIn("stray.txt", refusal.read_text())
+
+
+class TestFailureTaxonomy(LabCase):
+
+    def test_record_broken_quotes_the_refusal_and_salvages_leads(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, drop=("Not claimed",),
+                    ret={"claims_proposed": ["The bound is 17."]})
+        self.refused("ingest", rid)                       # writes refusal.txt
+        r = self.ok("ingest", rid, "--record-broken")
+        self.assertIn("UNINGESTABLE", r.stdout)
+        rec = self.ingest_json(rid)
+        self.assertIn("Not claimed", rec["refused_for"][0])
+        entry = (self.problem / "notebook" / "entries" /
+                 self.entries()[0]).read_text()
+        self.assertIn("Not claimed", entry)               # the reason, named
+        self.assertIn("The bound is 17.", entry)          # salvage, untrusted
+        self.assertIn("Dropped the greedy order", entry)  # leads survive
+        self.assertIn("not on record", entry)
+        self.assertEqual(rec["claims"], [])
+
+    def test_no_packet_files_as_harness_failure(self):
+        rid, _ = self.dispatch()
+        r = self.ok("ingest", rid, "--record-broken")
+        self.assertIn("HARNESS-FAILURE", r.stdout)
+        self.assertEqual(self.ingest_json(rid)["verdict"], "HARNESS-FAILURE")
+        self.assertIn("HARNESS-FAILURE", self.log())
+
+    def test_pending_verdict_names_the_unfinished_worker(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, verdict="PENDING")
+        err = self.refused("ingest", rid)
+        self.assertIn("PENDING", err)
+        self.assertIn("never finished", err)
+
+
+class TestVoidLintWaive(LabCase):
+
+    def test_void_closes_a_run_that_produced_nothing(self):
+        rid, _ = self.dispatch()
+        r = self.ok("void", rid, "--reason", "launch blocked; superseded by a "
+                                             "fresh dispatch")
+        self.assertIn("voided", r.stdout)
+        self.assertEqual(self.dispatch_json(rid)["status"], "void")
+        self.assertIn("VOID", self.log())
+        self.assertNotIn(rid, self.ok("catchup", "2020-01-01")
+                         .stdout.split("Still open:")[1])
+
+    def test_void_refuses_when_a_packet_exists(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        err = self.refused("void", rid, "--reason", "tidy")
+        self.assertIn("has a packet", err)
+
+    def test_lint_reports_and_passes(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, drop=("Leads",))
+        r = self.ok("lint", rid)
+        self.assertIn("does not pass", r.stdout)
+        self.packet(rid)
+        self.assertIn("passes the contract", self.ok("lint", rid).stdout)
+        # lint changed nothing: the run is still open and ingestable
+        self.assertEqual(self.dispatch_json(rid)["status"], "open")
+
+    def test_waive_review_clears_the_owed_line(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, validation="**Review** — recheck step 3.",
+                    ret={"validation": "review", "machine_markers": []})
+        self.ok("ingest", rid)
+        self.assertIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
+        self.ok("waive-review", rid, "--reason", "referee providers are down; "
+                                                 "accepted as-is for now")
+        self.assertNotIn("owe a review", self.ok("catchup", "2020-01-01").stdout)
+
+
+class TestIndependence(LabCase):
+    """Promotion records how independent the check was; same model needs an
+    explicit flag and is marked, never refused outright."""
+
+    def promote(self, *extra):
+        first, _ = self.dispatch(self.brief("Find the bound.", "b1.md"))
+        self.packet(first, ret={"claims_proposed": ["The bound is 9."]})
+        self.ok("ingest", first)
+        cid = self.ingest_json(first)["claims"][0]
+        second, _ = self.dispatch(self.brief("C claims the bound is 9; review "
+                                             "the claim adversarially but "
+                                             "fairly.", "b2.md"), extra=extra)
+        self.packet(second, headline="Attacked it; could not break it.")
+        self.ok("ingest", second)
+        return cid, second
+
+    def test_same_model_needs_the_flag_and_is_marked(self):
+        cid, ev = self.promote()                          # both worker-a
+        err = self.claims_refused("set", cid, "verified", "--actor", "director",
+                                  "--evidence", ev, "--rests-on", "none")
+        self.assertIn("same model", err)
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none",
+                       "--accept-same-model")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Independence:** none (same model", view)
+
+    def test_cross_model_promotes_clean_and_is_marked_full(self):
+        cid, ev = self.promote("--model", "worker-b")
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Independence:** full", view)
+
+    def test_a_fall_prints_its_dependents(self):
+        cid, ev = self.promote("--model", "worker-b")
+        self.claims_ok("set", cid, "verified", "--actor", "director",
+                       "--evidence", ev, "--rests-on", "none")
+        dep = self.claims_py("new", "--statement", "Therefore the gap closes.",
+                             "--actor", "director", "--rests-on", cid)
+        r = self.claims_ok("set", cid, "refuted", "--actor", "director")
+        self.assertIn("Standing on %s" % cid, r.stdout)
+        self.assertIn(dep, r.stdout)
+
+    def claims_ok(self, *args):
+        r = self.script(CLAIMS, *args)
+        self.assertEqual(r.returncode, 0, "expected success, got:\n%s%s"
+                         % (r.stdout, r.stderr))
+        return r
+
+    def claims_refused(self, *args):
+        r = self.script(CLAIMS, *args)
+        self.assertEqual(r.returncode, 2, "expected refusal, got:\n%s%s"
+                         % (r.stdout, r.stderr))
+        return r.stderr
+
+
+class TestAcceptedByInvestigator(LabCase):
+
+    def test_records_the_decision_and_catchup_lists_it(self):
+        cid = self.claims_py("new", "--statement",
+                             "Steen: the type-D spectrum is {0,...,n-2}.",
+                             "--actor", "director")
+        err = self.script(CLAIMS, "set", cid, "accepted-by-investigator",
+                          "--actor", "director").stderr
+        self.assertIn("--evidence", err)
+        r = self.script(CLAIMS, "set", cid, "accepted-by-investigator",
+                        "--actor", "director", "--evidence",
+                        "Investigator instruction 2026-08-23: take it as "
+                        "proved; thesis embargoed to 2099")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("accepted on the Investigator's word",
+                      self.ok("catchup", "2020-01-01").stdout)
+
+
+class TestDuplicateWarningLifecycle(LabCase):
+
+    def test_warning_persists_until_the_claim_moves(self):
+        self.claims_py("new", "--statement",
+                       "The largest cap in AG(4,3) has 20 points.",
+                       "--actor", "director")
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed":
+                              ["The largest cap in AG(4,3) has 20 points."]})
+        self.ok("ingest", rid)
+        cid = self.ingest_json(rid)["claims"][0]
+        self.assertIn("duplicate warning", self.ok("catchup", "2020-01-01").stdout)
+        self.claims_py("set", cid, "superseded", "--actor", "director",
+                       "--by", "C-001")
+        self.assertNotIn("duplicate warning",
+                         self.ok("catchup", "2020-01-01").stdout)
 
 
 if __name__ == "__main__":
