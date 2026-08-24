@@ -548,8 +548,8 @@ def cmd_new(args):
 def load_dispatch(problem, rid):
     p = run_dir(problem, rid) / "dispatch.json"
     if not p.exists():
-        refuse("there is no run %s under %s/runs. Run `run.py check` to see "
-               "which runs are on file." % (rid, problem.name))
+        refuse("there is no run %s under %s/runs. Run `run.py catchup` to "
+               "see which runs are on file." % (rid, problem.name))
     d = json.loads(p.read_text())
     if d.get("status") != "open":
         refuse("%s was already ingested on %s, with verdict %s. A run enters "
@@ -831,7 +831,8 @@ def cmd_ingest(args):
         changed = dirty(root) - set(d.get("ignore") or [])
         changed = {p for p in changed
                    if not (p.startswith(runs_prefix)
-                           and not p.startswith(runs_prefix + rid + "/"))}
+                           and not p.startswith(runs_prefix + rid + "/"))
+                   and "__pycache__" not in p and not p.endswith(".pyc")}
         bad = outside(changed, d["allowed"])
         if bad:
             refuse("%s wrote outside its fence: %s. It was allowed %s and "
@@ -1141,7 +1142,13 @@ def cmd_lint(args):
         print("RESULT.md is still PENDING — the worker has not finished. "
               "The contract below applies to the finished packet.")
     try:
-        read_packet(problem, rid, d)
+        verdict, secs, ret = read_packet(problem, rid, d)
+        if ret["validation"] == "replay" and not replay_command(secs["validation"]):
+            print("The packet does not pass the contract yet: validation "
+                  "declares `replay` but `## Validation` holds no command — "
+                  "the first indented or fenced code block there is what "
+                  "ingest runs.")
+            return
     except SystemExit:
         print("The packet does not pass the contract yet (reason above).")
         return
