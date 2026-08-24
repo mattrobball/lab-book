@@ -26,6 +26,7 @@ later work will lean on it.
 | `verified` | Established here, by validation on record: a replay that passed, or a review by someone other than its discoverer. |
 | `conditional` | Established *given* something this repository has not itself verified. |
 | `externally-established` | Established in the published literature, cited, not re-derived here. |
+| `accepted-by-investigator` | Taken as true on the Investigator's recorded decision — not proved here, not read in full. Visibly weaker than either of the above, and listed by catchup so nothing forgets what rests on decree. |
 | `refuted` | Shown false under the claim's own stated conditions. Terminal. |
 | `superseded` | Replaced by a sharper claim. Terminal. |
 
@@ -36,6 +37,7 @@ later work will lean on it.
 | `proposed` | `conditional`, `verified`, `externally-established`, `refuted`, `superseded` |
 | `conditional` | `verified`, `proposed`, `refuted`, `superseded` |
 | `externally-established` | `conditional`, `proposed`, `refuted`, `superseded` |
+| `accepted-by-investigator` | `proposed`, `refuted`, `superseded` |
 | `verified` | `proposed`, `refuted`, `superseded` |
 | `refuted` | none — terminal |
 | `superseded` | none — terminal |
@@ -62,6 +64,17 @@ Leaving a claim at `verified` while you privately doubt it is neither.
   never went through ingest does not exist for this purpose, however convincing
   it looked at the time. A citation is not validation: it makes a claim
   `externally-established`.
+- **Verifying names its evidence and its ground.** `claims.py set verified`
+  takes `--evidence R-NNN` and `--rests-on` (claim IDs, or `none`). The script
+  compares the evidence run's model against the discovering run's and records
+  the result on the claim — `full`, `partial (same provider)`, or, only with
+  `--accept-same-model`, `none`. Same-model checking is allowed, not
+  preferred, and always visible: the reference run promoted a claim on a
+  run by the very model that discovered it, and nothing showed it.
+- **When a claim falls, its dependents surface.** Refuting, superseding or
+  demoting prints every claim resting on it, transitively. State dependencies
+  at promotion, when the proof is fresh — the one dependency hunt done by
+  hand took four hours and missed one.
 - **`refuted` and `superseded` are terminal.** Reviving an idea means a *new*
   claim, with a new ID, citing the old one. The old one stays where it is.
   Otherwise nobody can tell later which version of a claim an argument used.

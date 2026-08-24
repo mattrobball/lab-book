@@ -27,29 +27,42 @@ These are binding, not advice.
 1. **Orient** — read the problem's `STATUS.md` and `OPEN_QUESTIONS.md`, see
    which runs are still open, then run catchup to see what changed since you
    last looked.
-2. **Brief** — write the task from `templates/BRIEF.md`.
+2. **Brief** — write the task from `templates/BRIEF.md`. A check is
+   dispatched adversarially: "A claims X; review the claim adversarially but
+   fairly — your job is to prove or refute it." A check that reads the proof
+   is a comment; a check that attacks the statement is evidence.
 3. **Dispatch** — `run.py new` allocates the run, records it, and assembles the
    worker's prompt.
 4. **Ingest** — `run.py ingest` checks the returned packet, replays its
    evidence, files the notebook entry, and commits the run.
 5. **Adjudicate** — read the packet yourself, then set claim status with
-   `claims.py` as a separate, deliberate act.
+   `claims.py` as a separate, deliberate act. Verifying names the evidence
+   run and what the claim rests on; file the reasoning as a `run.py note`
+   while it is fresh. If you catch yourself doing the mathematics here, you
+   may — but your work is a lead, never evidence: it enters the record only
+   through a Technician who checks it adversarially like anyone else's claim.
 6. **Update** — move anything reusable the run built into the problem's
-   `tools/`, turn the packet's `## Leads` into "Ruled out" lines and open
-   questions, and rewrite `STATUS.md` and `OPEN_QUESTIONS.md` to say what you
-   now believe.
+   `tools/`, cached sources into `sources/` with their hashes, the packet's
+   `## Leads` into "Ruled out" lines and open questions, and rewrite
+   `STATUS.md` and `OPEN_QUESTIONS.md` to say what you now believe.
 
-## The three refusals
+## The four refusals
 
-Three things are enforced by code and refuse rather than warn. A refusal is
+Four things are enforced and refuse rather than warn. A refusal is
 information. Do not work around one.
 
 1. **Claim status changes only through `claims.py`.** Never by editing a file.
 2. **A run enters the record only through `run.py ingest`.** An unrecorded
-   return is one nobody can audit later.
+   return is one nobody can audit later. A run that produced nothing is
+   closed with `run.py void`, reason on record — never left open forever.
 3. **No dispatch without a stated model.** `run.py new` refuses when it cannot
    resolve one, because an unset model quietly inherits this session's model
    and spends an expensive one on a cheap job.
+4. **`run.py`, `claims.py` and `lab.json` change only with the Investigator's
+   explicit agreement, recorded as a note before the commit.** The gate is
+   not casually modified by the party it judges. After any such change, run
+   one small canary dispatch and ingest it clean before resuming normal work
+   — the one fence patch that skipped this shipped broken.
 
 Everything else here is advisory.
 
@@ -90,3 +103,7 @@ across repositories is a citation, never a dependency.
   hand-written, so assume it lags a little.
 - `lab.json` holds the models, launch commands, and tools confirmed on this
   machine.
+- `problems/<slug>/sources/` holds cached literature with a hash manifest and
+  `QUERIES.md`, the append-only log of searches and answers — so the
+  searching is done once. An inaccessible source gets a manifest line saying
+  what was tried and when to retry, never a claim.

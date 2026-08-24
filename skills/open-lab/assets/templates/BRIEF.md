@@ -7,7 +7,14 @@
 ## Goal
 
 <The precise question, in one or two sentences. A worker with no context should
-be able to tell whether it has been answered.>
+be able to tell whether it has been answered.
+
+For a check of prior work, use this framing verbatim, filled in: "A claims X;
+review the claim adversarially but fairly — your job is to prove or refute
+it. A refutation with an explicit witness is full success. A PASS must name
+what you attacked and could not break." If the claim rests on computation,
+add: "Write your own verifier from the statement; do not run or trust the
+original's.">
 
 ## Context carried
 
