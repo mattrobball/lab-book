@@ -366,23 +366,85 @@ def guard_foreign_runs(root, staged):
 
 
 GITIGNORE_LINES = ("__pycache__/", "*.pyc")
+PYCACHE_MARK = "# Byte-compiled files are not part of the record."
+LARGE_MARK = ("# outputs over commits.max_mb, kept on disk, pinned by hash "
+              "in ingest.json")
+
+
+def add_to_gitignore(root, lines, header=None):
+    """Add lines to the lab's .gitignore, each once, under a one-time
+    header. One place writes that file, so a rule added at ingest cannot
+    undo one written at setup."""
+    path = Path(root) / ".gitignore"
+    text = path.read_text() if path.exists() else ""
+    present = text.splitlines()
+    missing = [l for l in lines if l not in present]
+    if not missing:
+        return False
+    block = ([header] if header and header not in present else []) + missing
+    tail = "" if not text or text.endswith("\n") else "\n"
+    path.write_text(text + tail + "\n".join(block) + "\n")
+    return True
 
 
 def ensure_gitignore(root):
     """Byte-compiled Python is not a record. Every uncommitted file counts
     against the worker whose run is being ingested, and a stray .pyc left
-    under a run directory implicates a worker that never wrote it. Written
-    once, appended to if the file exists without these lines."""
-    path = Path(root) / ".gitignore"
-    text = path.read_text() if path.exists() else ""
-    missing = [l for l in GITIGNORE_LINES if l not in text.splitlines()]
-    if not missing:
-        return False
-    head = "" if text else ("# Byte-compiled files are not part of the "
-                            "record.\n")
-    tail = "" if not text or text.endswith("\n") else "\n"
-    path.write_text(text + tail + head + "\n".join(missing) + "\n")
-    return True
+    under a run directory implicates a worker that never wrote it."""
+    return add_to_gitignore(root, GITIGNORE_LINES, PYCACHE_MARK)
+
+
+def gitignore_pattern(path):
+    """One path as an exact .gitignore entry: anchored at the top of the
+    lab, with the pattern characters escaped, so a file whose name contains
+    one cannot become a rule that hides other files."""
+    return "/" + re.sub(r"([\[\]\*\?\\!#])", r"\\\1", path)
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def hold_back_large_files(problem, root, rid):
+    """Keep an oversized run output on disk instead of in the history, and
+    pin it by its hash in the record. A file committed once is in the
+    history for good: one ingest put two run outputs of a few hundred
+    megabytes each into a lab's history, and from then on the record could
+    not be pushed at all, because the host refuses a file that size. The
+    output is still here and still checkable against the sha in
+    ingest.json; what would not have been here is a repository anyone could
+    clone. Returns what was held back, and leaves .gitignore naming it so
+    that neither the scripts' commits nor a later `git add -A` picks it up."""
+    cap = (lab_config(root).get("commits") or {}).get("max_mb")
+    cap = DEFAULT_COMMIT_MAX_MB if cap is None else cap
+    limit, held, patterns = cap * 1024 * 1024, [], []
+    for path in sorted(run_dir(problem, rid).rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        relative = rel(path, root)
+        if size <= limit or relative is None:
+            continue
+        held.append({"path": relative, "bytes": size,
+                     "sha256": file_sha256(path)})
+        if git(root, "check-ignore", "-q", "--", relative).returncode == 0:
+            continue                      # already ignored: nothing to add
+        patterns.append(gitignore_pattern(relative))
+        print("%s is %.1f MB, over commits.max_mb (%s). It stays on disk "
+              "where the run left it and is not committed; its sha256 is in "
+              "ingest.json, and .gitignore now names it. A file this size in "
+              "the history cannot be pushed at all."
+              % (relative, size / 1048576.0, cap))
+    if patterns:
+        add_to_gitignore(root, patterns, LARGE_MARK)
+    return held
 
 
 def cmd_guard_commit(args):
@@ -707,6 +769,8 @@ def resource_line(problem, rid):
 # ---------------------------------------------------------- transcripts
 
 TRANSCRIPT_NAME = "session.jsonl.gz"
+# The size at which hosts start warning about a file in the history.
+DEFAULT_COMMIT_MAX_MB = 50
 TRANSCRIPT_GRACE = 120          # a session file is flushed a moment late
 DEFAULT_MAX_MB = 20
 
@@ -1445,6 +1509,7 @@ def cmd_ingest(args):
         write_json(rundir / "ingest.json",
                    {"run": rid, "ts": now(), "actor": actor,
                     "investigator": tag, "host": host(),
+                    "large_files": hold_back_large_files(problem, root, rid),
                     "transcript": attach_transcript(problem, root, rid, d,
                                                     args.transcript),
                     "verdict": verdict, "replayed": False,
@@ -1473,7 +1538,8 @@ def cmd_ingest(args):
                            % (time.strftime("%Y-%m-%d", time.gmtime()), rid,
                               verdict, reasons[0][:80]),
                            "\n".join(body), tag)
-        commit(root, [rel(rundir, root), rel(problem / "notebook", root)],
+        commit(root, [rel(rundir, root), rel(problem / "notebook", root),
+                      ".gitignore"],
                "%s %s: %s" % (rid, verdict, reasons[0][:60]))
         print("%s filed as %s (%s). No claims allocated. Entry: %s"
               % (rid, verdict, reasons[0][:80], rel(entry, root)))
@@ -1571,8 +1637,11 @@ def cmd_ingest(args):
                                               rid, verdict, ret["headline"]),
                        "\n".join(body), tag)
 
+    # After the fence check, which reads the tree as the worker left it, and
+    # before the commit that would otherwise carry these files in.
     record = {"run": rid, "ts": now(), "actor": actor, "verdict": verdict,
               "investigator": tag, "host": host(),
+              "large_files": hold_back_large_files(problem, root, rid),
               "transcript": attach_transcript(problem, root, rid, d,
                                               args.transcript),
               "director_session": director_session(),
@@ -1585,7 +1654,7 @@ def cmd_ingest(args):
     d.update(status="ingested", verdict=verdict, ingested_at=record["ts"],
              replayed=replayed)
     write_json(rundir / "dispatch.json", d)
-    paths = [rel(rundir, root), rel(problem / "notebook", root)]
+    paths = [rel(rundir, root), rel(problem / "notebook", root), ".gitignore"]
     paths += [rel(run_dir(problem, t), root) for t in touched]
     with ingest_lock(root):
         commit(root, paths, "%s ingested: %s — %s" % (rid, verdict, ret["headline"]))
@@ -2038,8 +2107,9 @@ def cmd_transcript(args):
               % (rid, d.get("role")))
         return
     rec["transcript"] = found
+    rec["large_files"] = hold_back_large_files(problem, root, rid)
     write_json(run_dir(problem, rid) / "ingest.json", rec)
-    commit(root, [rel(run_dir(problem, rid), root)],
+    commit(root, [rel(run_dir(problem, rid), root), ".gitignore"],
            "%s: transcript attached" % rid)
     print("%s: transcript on record." % rid)
     push_own_branch(root, tag)

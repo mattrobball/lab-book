@@ -60,6 +60,7 @@ Every key the scripts read, in one example:
   },
   "tools": ["<confirmed-tool>", "<confirmed-tool>"],
   "machine": {"max_heavy_runs": 2, "rotate_after_ingests": 12},
+  "commits": {"max_mb": 50},
   "transcripts": {"max_mb": 20},
   "sources": {"refetch_days": 30},
   "investigators": {}
@@ -74,7 +75,8 @@ groups read over the worker's log when the built-in token shapes do not fit.
 `transcript` says where that worker's session file lives ("Transcripts").
 `machine.max_heavy_runs` is the Director's ceiling on compute-heavy workers
 at once; `machine.rotate_after_ingests` is when a session is told it has run
-long. `transcripts.max_mb` caps what is copied into the record;
+long. `commits.max_mb` is the largest file ingest will put in the history;
+`transcripts.max_mb` caps what is copied into the record;
 `sources.refetch_days` is when a baseline is called stale. `investigators`
 is written by `run.py join` — never by hand.
 
@@ -342,6 +344,16 @@ packet is a mutation nobody can audit. `--worker-done` covers a worker that
 has exited without `execution.json` saying so; it never overrides a live
 process, which is how an orphan once kept writing into a filed run while its
 duplicate was dispatched.
+
+A run's own outputs can be too big to commit. Before it commits, ingest
+walks the run directory and leaves every file over `commits.max_mb`
+(`lab.json`, default 50) where it is: the path goes into the lab's
+`.gitignore`, so neither the scripts nor a later `git add -A` picks it up,
+and `ingest.json` records the path, the size and the sha256 of the file on
+disk. The output is still there and still checkable against that hash; what
+is not there is a history nobody can push, which is what a few hundred
+megabytes committed at one ingest leaves behind. `--record-broken` and
+`run.py transcript` hold files back the same way.
 
 Every refusal saves its reason to the run's `refusal.txt`. Filing the failure
 is then one command with two honest verdicts: `ingest R-NNN --record-broken`

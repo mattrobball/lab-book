@@ -4,7 +4,7 @@ description: >-
   Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
 ---
 
 # Lab book

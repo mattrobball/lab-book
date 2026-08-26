@@ -971,6 +971,68 @@ class TestHousekeeping(LabCase):
         self.assertEqual(e["usage"], {"cost": "5"})
 
 
+class TestLargeOutputs(LabCase):
+    """A file committed once is in the history for good, and a host refuses
+    one past a certain size: after such an ingest the record cannot be
+    pushed at all."""
+
+    def cap(self, mb):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["commits"] = {"max_mb": mb}
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        git(self.root, "add", "lab.json")
+        git(self.root, "commit", "-q", "-m", "cap on what a commit may carry")
+
+    def outputs(self, rid, big=200 * 1024, small=200):
+        d = self.problem / "runs" / rid / "packet"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "big.bin").write_bytes(b"x" * big)
+        (d / "small.txt").write_bytes(b"y" * small)
+        return d / "big.bin", d / "small.txt"
+
+    def tracked(self, path):
+        rel = str(Path(path).relative_to(self.root))
+        return git(self.root, "ls-files", "--", rel).stdout.strip() == rel
+
+    def test_an_oversized_output_stays_on_disk_pinned_by_hash(self):
+        self.cap(0.05)                       # ~52 KB
+        rid, _ = self.dispatch()
+        big, small = self.outputs(rid)
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIn("stays on disk", r.stdout)
+        self.assertIn("big.bin", r.stdout)
+
+        self.assertTrue(big.exists(), "the output was not left where it was")
+        self.assertFalse(self.tracked(big), "the oversized file was committed")
+        self.assertTrue(self.tracked(small))
+        ignore = (self.root / ".gitignore").read_text()
+        self.assertIn("pinned by hash in ingest.json", ignore)
+        self.assertIn("/problems/demo/runs/%s/packet/big.bin" % rid, ignore)
+
+        held = self.ingest_json(rid)["large_files"]
+        self.assertEqual([h["path"] for h in held],
+                         ["problems/demo/runs/%s/packet/big.bin" % rid])
+        self.assertEqual(held[0]["bytes"], 200 * 1024)
+        self.assertEqual(held[0]["sha256"],
+                         hashlib.sha256(big.read_bytes()).hexdigest())
+        # Ignored files are not uncommitted work: the tree is clean, and a
+        # later `git add -A` cannot sweep the file in either.
+        self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
+        git(self.root, "add", "-A")
+        self.assertFalse(self.tracked(big))
+
+    def test_under_the_default_cap_everything_is_committed(self):
+        rid, _ = self.dispatch()
+        big, small = self.outputs(rid)
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertNotIn("stays on disk", r.stdout)
+        self.assertTrue(self.tracked(big))
+        self.assertTrue(self.tracked(small))
+        self.assertEqual(self.ingest_json(rid)["large_files"], [])
+
+
 class TestTranscripts(LabCase):
     """The worker's own session file, copied into the record at ingest. Its
     stdout is in worker.log; the reasoning and tool calls behind a result
