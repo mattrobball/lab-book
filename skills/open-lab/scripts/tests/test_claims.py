@@ -60,10 +60,12 @@ class LabCase(unittest.TestCase):
             args += ["--" + k.replace("_", "-"), v]
         return self.ok(*args).stdout.strip().splitlines()[-1]
 
-    def ingest_run(self, run_id="R-007"):
+    def ingest_run(self, run_id="R-007", verdict="PASS"):
         d = self.problem / "runs" / run_id / "packet"
         d.mkdir(parents=True)
         (d / "RETURN.json").write_text(json.dumps({"headline": "checked"}))
+        if verdict:
+            (d.parent / "ingest.json").write_text(json.dumps({"verdict": verdict}))
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "run %s" % run_id)
 
@@ -107,14 +109,23 @@ class TestTransitions(LabCase):
         err = self.refused("set", cid, "probably-true", "--actor", "bob")
         self.assertIn("not one of the statuses", err)
 
-    def test_verified_to_conditional_refused(self):
+    def test_verified_to_conditional_is_the_honest_correction(self):
         self.ingest_run()
         cid = self.new("A holds.")
         self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
                 "--rests-on", "none")
-        err = self.refused("set", cid, "conditional", "--actor", "bob")
-        self.assertIn("cannot become conditional", err)
-        self.assertEqual(self.status_of(cid), "verified")
+        self.ok("set", cid, "conditional", "--actor", "bob")
+        self.assertEqual(self.status_of(cid), "conditional")
+
+    def test_proposed_to_verified_checks_dependencies_too(self):
+        """F-006: the rests-on check once ran only from conditional."""
+        self.ingest_run("R-001")
+        base = self.new("The bound is 224.", actor="alice")
+        dep = self.new("Therefore the gap closes.", actor="carol")
+        err = self.refused("set", dep, "verified", "--actor", "bob",
+                           "--evidence", "R-001", "--rests-on", base)
+        self.assertIn("rests on %s (proposed)" % base, err)
+        self.assertEqual(self.status_of(dep), "proposed")
 
     def test_off_refuted_refused(self):
         cid = self.new("A holds.")
@@ -164,6 +175,19 @@ class TestPromotionGates(LabCase):
         err = self.refused("set", cid, "verified", "--actor", "bob",
                            "--evidence", "R-042")
         self.assertIn("no ingested run R-042", err)
+
+    def test_verified_rejects_a_refused_or_broken_run(self):
+        """F-024: a refused packet still has its RETURN.json on disk, and a
+        claim was once promoted on it. Only ingest.json is the record."""
+        self.ingest_run("R-008", verdict=None)
+        cid = self.new("A holds.")
+        err = self.refused("set", cid, "verified", "--actor", "bob",
+                           "--evidence", "R-008")
+        self.assertIn("never ingested", err)
+        self.ingest_run("R-009", verdict="UNINGESTABLE")
+        err = self.refused("set", cid, "verified", "--actor", "bob",
+                           "--evidence", "R-009")
+        self.assertIn("UNINGESTABLE", err)
 
     def test_externally_established_needs_a_citation(self):
         self.ingest_run()

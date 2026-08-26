@@ -38,7 +38,7 @@ later work will lean on it.
 | `conditional` | `verified`, `proposed`, `refuted`, `superseded` |
 | `externally-established` | `conditional`, `proposed`, `refuted`, `superseded` |
 | `accepted-by-investigator` | `proposed`, `refuted`, `superseded` |
-| `verified` | `proposed`, `refuted`, `superseded` |
+| `verified` | `conditional`, `proposed`, `refuted`, `superseded` |
 | `refuted` | none — terminal |
 | `superseded` | none — terminal |
 
@@ -49,7 +49,11 @@ that turned out to be shakier than it looked. Demoting is cheap and honest.
 Leaving a claim at `verified` while you privately doubt it is neither.
 
 `conditional → verified` is legal only once the thing it rested on is itself a
-`verified` claim in this repository, cited by ID.
+`verified` claim in this repository, cited by ID. The script checks this on
+every move to `verified`, from any status. `verified → conditional` is the
+honest correction when a verified claim turns out to rest on something not
+verified here — it once had to be demoted all the way to `proposed` for want
+of that move.
 
 ## The hard rules
 
@@ -63,7 +67,12 @@ Leaving a claim at `verified` while you privately doubt it is neither.
   that passed, or a review by an actor different from the discoverer. Work that
   never went through ingest does not exist for this purpose, however convincing
   it looked at the time. A citation is not validation: it makes a claim
-  `externally-established`.
+  `externally-established`. The script checks `ingest.json`, not the
+  packet: a refused packet still has its files on disk, and a claim was once
+  promoted on a check run the gate had rejected.
+- **Never chain a status change after an ingest in one command.** If the
+  ingest is refused, the `claims.py set` behind it still fires. Run the
+  ingest, read its verdict, then change status as a separate command.
 - **Verifying names its evidence and its ground.** `claims.py set verified`
   takes `--evidence R-NNN` and `--rests-on` (claim IDs, or `none`). The script
   compares the evidence run's model against the discovering run's and records
@@ -83,6 +92,30 @@ Leaving a claim at `verified` while you privately doubt it is neither.
   citing whole and not building on; the moment your own claim depends on it,
   your claim is conditional.
 
+## One ledger each
+
+Each investigator writes their own append-only stream,
+`claims/ledger-<tag>.jsonl`, with the stream from before anyone joined read
+alongside them. Nobody appends to anybody else's. Two people writing one
+file conflict on every push, over lines neither of them wrote.
+
+A claim's current state is its **latest event across every stream**. The
+scripts read all of them, fold the statements in before the status changes —
+two machines' clocks need not agree — and rebuild the views from the result.
+When two streams have left one claim in two different states, that is a
+disagreement between people, and it goes on the meeting's agenda rather than
+being resolved by whoever ran a script last.
+
+Claim IDs carry their author's tag (`C-<tag>-004`), so two investigators
+cannot mint the same one, and a claim from another stream is cited by ID like
+any other. What you may not do is set the status of a claim you cannot see
+in your own tree: cite it as fetched, and settle it at the meeting.
+
+`independence` records one thing more when the check came from another
+investigator's run: "different lab". A second machine, a second person and a
+second model reaching the same result is the strongest form on offer here,
+and it is worth being able to grep for.
+
 ## Citing claims in prose
 
 Write the ID inline, in the sentence that uses it: `By C-021, the second method
@@ -90,6 +123,9 @@ is the faster one.` A load-bearing sentence with no ID is an assertion.
 
 ## Generated files
 
-`CLAIMS.md` and the per-claim files are views built from the ledger. The ledger
-is the only truth about status. Edit neither by hand; change status with
-`claims.py` and let the views be rebuilt.
+`CLAIMS.md` and the per-claim files are views built from the ledgers. The
+ledgers are the only truth about status. Edit neither by hand; change status
+with `claims.py` and let the views be rebuilt. After any merge, `run.py
+rebuild` (or `claims.py rebuild`) regenerates them from every stream — a
+generated page merged by hand is a page that no longer says what the record
+says.

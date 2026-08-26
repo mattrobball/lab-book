@@ -14,7 +14,12 @@ review the claim adversarially but fairly — your job is to prove or refute
 it. A refutation with an explicit witness is full success. A PASS must name
 what you attacked and could not break." If the claim rests on computation,
 add: "Write your own verifier from the statement; do not run or trust the
-original's.">
+original's." If the checker's method will differ from the original's, name
+a control: "First reproduce <a case the original's method got right>; only
+then attack the claim" — a referee once switched engines, never calibrated,
+and returned a wrong answer. Name the run under check — "This is a check of
+R-NNN" — and dispatch with `--checks R-NNN`, so the record shows which run
+was refereed.>
 
 ## Context carried
 
@@ -36,11 +41,25 @@ in parallel, name their directories here as off-limits.>
 - Never invent a claim ID. Copy into `claims_used` exactly the IDs given in
   Context carried, and propose new claims as plain sentences.
 - Nothing written outside Allowed writes.
+- No backgrounded jobs. Run long computations in the foreground and wait. If
+  one will not finish inside your session, checkpoint to disk, say where in
+  `## What was done`, and return UNDECIDED — a session once exited with its
+  calculation still running and the result in limbo.
 - <Anything specific to this task: a method known not to work, an input known
   to be degenerate.>
+
+## Machine budget
+
+<Memory the whole run may hold resident, and per process; wall time. State
+them as numbers: "≤ 10 GB resident, ≤ 3 GB per process; ≤ 4 h". Heavy runs
+stream to disk and checkpoint. The Director passes the same numbers to
+`run.py new --memory-gb --worker-timeout`; a breach is reported to the
+Investigator, who decides whether the run dies or continues.>
 
 ## Metrics
 
 <What makes this PASS. The values to report, and the exact marker strings the
-replay must print. If nothing here is executable, say so and say what a referee
-would have to check instead.>
+replay must print. The replay is one code block, run as one shell script: a
+single command, or several lines joined with `&&`; every line must succeed. If
+nothing here is executable, say so and say what a referee would have to check
+instead.>

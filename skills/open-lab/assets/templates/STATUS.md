@@ -4,17 +4,22 @@
      This is not a log — the notebook is the log. If you are tempted to append
      rather than rewrite, the thing you want is a notebook entry. -->
 
-_Last updated: <date>, after <run ID or nothing>._
+<!-- No "last updated" line: catchup and ingest print when this file was
+     last committed and which runs came in since. -->
 
 ## Bottom line
 
 <!-- Where the problem stands right now, in three or four plain sentences.
-     Cite claims inline: "By C-021, ...". -->
+     Cite claims inline: "By C-021, ...". Belief is what this page is for,
+     but belief in the voice of fact is the failure: a claim still
+     `proposed` appears here only as "C-118 (proposed, unreviewed)", so a
+     reader can tell which sentences a refutation would take with it.
+     Catchup lists any that lack the label; you add it by hand. -->
 
 ## What is settled
 
 <!-- The verified and externally-established claims that matter, by ID, one
-     line each. -->
+     line each. Same label rule as above. -->
 
 ## What is conditional
 

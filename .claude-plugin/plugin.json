@@ -1,7 +1,7 @@
 {
   "name": "lab-book",
   "description": "Lab notebook infrastructure for coding-agent sessions: claims with status, dispatched runs with replayed evidence, an append-only notebook.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "mattrobball"
   }

@@ -20,7 +20,13 @@
 ## Objects and definitions
 
 <!-- The things this problem talks about, defined once, so briefs can paste
-     them in. -->
+     them in and every message uses the same words. Each entry: the term,
+     its definition in plain words, one small worked example, and its
+     source — the paper or book, or "Investigator, intake". Written at
+     intake and confirmed by the Investigator before work starts. -->
+
+- **<term>** — <definition>. *Example:* <a small concrete instance>.
+  *Source:* <citation, or "Investigator, intake">.
 
 ## Scope
 

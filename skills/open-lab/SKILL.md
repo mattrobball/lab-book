@@ -4,7 +4,7 @@ description: >-
   Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Lab book
@@ -21,7 +21,10 @@ never decides anything. The record has three parts that never mix — the
 says what is currently believed and is rewritten freely; **claims** carry status
 and provenance, and nothing counts as a fact until it is one. Every mechanism
 here names the failure it prevents; one that cannot name a failure should not
-exist.
+exist. It names it in general words — what went wrong, never where: no run
+IDs except as format examples, no lab, problem, vendor or model names. The
+reference run is the one worked example this kit cites. Facts about a
+particular lab belong in that lab's own `AGENTS.md`, notes, and `lab.json`.
 
 ## Am I in a lab already?
 
@@ -39,11 +42,18 @@ this context.
 
 ## Setting up a new lab
 
-First the three discovery steps, in the order and wording of **"Starting a lab"
+Open with two sentences on what is about to happen — you will ask about the
+problem, look at the machine and the literature, and set up the folder — and
+one question: has the Investigator used a coding agent before? Adapt to the
+answer: with a newcomer, say what each step does before doing it and keep
+every message short. The charter's "Talking to the Investigator" rules apply
+from the first message.
+
+Then the discovery steps, in the order and wording of **"Starting a lab"
 in `references/runs.md`** — read that section and follow it rather than working
 from memory:
 
-1. The five questions to the Investigator, one at a time.
+1. The six questions to the Investigator, one at a time.
 2. Environment discovery — probe for the agent tools, the subject tools, and
    the libraries actually present, and have the Investigator confirm the list.
 3. Literature discovery — what is published on this exact question; what
@@ -57,16 +67,24 @@ Then scaffold the lab repository:
 2. Copy from this skill's own directory into the root of the lab repository:
    - `assets/AGENTS.md` → `AGENTS.md`
    - `assets/CLAUDE.md` → `CLAUDE.md`
+   - `assets/GLOSSARY.md` → `GLOSSARY.md`
    - `scripts/claims.py` → `claims.py`
    - `scripts/run.py` → `run.py`
    - `assets/templates/` → `templates/`
 3. Write `lab.json` from the discovery results — the models, launch commands,
    and confirmed tools. Its shape is in `references/runs.md`; the skill ships no
    models or commands of its own.
-4. Commit.
-5. Create the first problem directory, `problems/<slug>/`, from
+4. `run.py join`. It registers this Investigator in `lab.json` from git's
+   `user.name`, creates their branch `lab/<tag>`, and checks it out. Do this
+   before the first commit: everything after it is recorded on that branch,
+   and a second investigator joining later needs nothing else to start.
+5. Commit.
+6. Fill `## This Investigator` at the end of `AGENTS.md` from the sixth
+   question, in the Investigator's words, and commit.
+7. Create the first problem directory, `problems/<slug>/`, from
    `templates/problem_README.md`, `templates/STATUS.md`, and
-   `templates/OPEN_QUESTIONS.md`, then start the loop in `AGENTS.md`.
+   `templates/OPEN_QUESTIONS.md` — on the founder's own branch — then start
+   the loop in `AGENTS.md`.
 
 The copies are deliberate. A lab repository holds its own charter, scripts, and
 templates, so it stays self-contained and replayable — a run ingested a year ago

@@ -4,11 +4,15 @@ drives the script as a subprocess, the way a Director would.
 
 Run from open-lab/scripts/tests/:  python3 -m unittest
 """
+import gzip
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -34,6 +38,7 @@ class LabCase(unittest.TestCase):
         (self.root / "lab.json").write_text(json.dumps({
             "roles": {"technician": {"model": "worker-a",
                                      "command": "/bin/echo {prompt}"},
+                      "manual": {"model": "worker-a"},
                       "nameless": {"command": "/bin/echo {prompt}"}},
             "tools": ["python3"]}))
         self.problem = self.root / "problems" / "demo"
@@ -44,10 +49,10 @@ class LabCase(unittest.TestCase):
         git(self.root, "commit", "-q", "-m", "seed")
 
     # -- driving the scripts ---------------------------------------------
-    def script(self, path, *args, cwd=None):
+    def script(self, path, *args, cwd=None, env=None):
         return subprocess.run([sys.executable, str(path)] + list(args),
                               cwd=str(cwd or self.problem), capture_output=True,
-                              text=True)
+                              text=True, env=dict(os.environ, **(env or {})))
 
     def run_py(self, *args, **kw):
         return self.script(RUN, *args, **kw)
@@ -79,7 +84,8 @@ class LabCase(unittest.TestCase):
         return p
 
     def dispatch(self, brief=None, extra=(), expect_warning=None):
-        args = ["new", "--brief", str(brief or self.brief()), "--no-launch"]
+        args = ["new", "--brief", str(brief or self.brief()), "--no-launch",
+                "--role", "manual"]
         r = self.ok(*args, *extra)
         if expect_warning:
             self.assertIn(expect_warning, r.stdout)
@@ -186,10 +192,119 @@ class TestDispatch(LabCase):
         rid = r.stdout.split()[0]
         self.assertEqual((self.problem / "runs" / rid / "worker.log").read_text(), "")
 
-    def test_second_dispatch_of_the_same_brief_warns(self):
+    def test_second_dispatch_of_the_same_brief_is_refused(self):
+        """F-026: a retry that fired twice dispatched the same question
+        twice; the old warning was scrolled past."""
         b = self.brief()
         self.dispatch(b)
-        self.dispatch(b, expect_warning="same brief")
+        err = self.refused("new", "--brief", str(b), "--no-launch",
+                           "--role", "manual")
+        self.assertIn("same brief", err)
+        self.dispatch(b, extra=["--force"], expect_warning="same brief")
+
+    def test_role_on_hold_refused_until_its_date(self):
+        """F-007: a brief was written for a role with no quota; the fact lived
+        in a note. A hold is a date, so it lifts itself."""
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["roles"]["manual"].update(unavailable_until="2999-01-01",
+                                      note="quota exhausted")
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        err = self.refused("new", "--brief", str(self.brief()), "--no-launch",
+                           "--role", "manual")
+        self.assertIn("quota exhausted", err)
+        self.assertIn("manual until 2999-01-01",
+                      self.ok("catchup", "2020-01-01").stdout)
+        cfg["roles"]["manual"]["unavailable_until"] = "2000-01-01"
+        cfg["roles"]["manual"]["note"] = "for: small jobs. not for: long reads"
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        _, r = self.dispatch()
+        self.assertIn("not for: long reads", r.stdout)    # F-008: read at dispatch
+        cfg["roles"]["manual"] = {"model": "worker-a", "available": False}
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        err = self.refused("new", "--brief", str(self.brief("b", "b2.md")),
+                           "--no-launch", "--role", "manual")
+        self.assertIn("goes stale", err)
+
+    def sleeper_role(self, seconds, **limits):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["roles"]["sleeper"] = dict(
+            {"model": "worker-z",
+             "command": "/bin/sh -c 'sleep %s' {prompt}" % seconds}, **limits)
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+
+    def test_breach_is_recorded_and_reported_never_enforced(self):
+        """F-002/F-028: the wait once had its eyes closed. A worker over
+        budget is reported at every step; killing it is the Investigator's
+        call, so it finishes on its own here."""
+        self.sleeper_role(2, worker_timeout=1)
+        r = self.ok("new", "--brief", str(self.brief()), "--role", "sleeper",
+                    "--memory-gb", "0.000001", env={"LAB_POLL_SECONDS": "0.2"})
+        rid = r.stdout.split()[0]
+        self.assertIn("Investigator decides", r.stdout)
+        e = json.loads((self.problem / "runs" / rid / "execution.json").read_text())
+        self.assertEqual(e["exit"], 0)                      # not killed
+        self.assertEqual(sorted(b["kind"] for b in e["breaches"]),
+                         ["memory", "timeout"])
+        self.assertGreater(e["peak_rss_mb"], 0)
+        self.assertEqual(e["limits"]["worker_timeout"], 1)
+        # An open run with a breach is named at every step until it ends.
+        rid2, _ = self.dispatch(self.brief("b", "b2.md"))
+        sleeper = subprocess.Popen(["/bin/sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        (self.problem / "runs" / rid2 / "execution.json").write_text(json.dumps(
+            {"run": rid2, "pid": sleeper.pid, "start": "now",
+             "breaches": [{"kind": "memory", "at": "t", "seen": 12.5,
+                           "unit": "GB", "limit": 10}]}))
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("%s: over its memory budget" % rid2, out)
+        self.assertIn("kill %d" % sleeper.pid, out)
+
+    def test_detach_returns_at_once_and_ingest_waits_for_the_exit(self):
+        """F-015: chained dispatches serialized because new never returned."""
+        self.sleeper_role(2)
+        t0 = time.time()
+        r = self.ok("new", "--brief", str(self.brief()), "--role", "sleeper",
+                    "--detach", env={"LAB_POLL_SECONDS": "0.2"})
+        self.assertLess(time.time() - t0, 1.5)
+        self.assertIn("Detached", r.stdout)
+        rid = r.stdout.split()[0]
+        ex = self.problem / "runs" / rid / "execution.json"
+        for _ in range(50):
+            if "pid" in json.loads(ex.read_text()):
+                break
+            time.sleep(0.1)
+        self.packet(rid)
+        err = self.refused("ingest", rid)
+        self.assertIn("still running", err)
+        for _ in range(60):
+            if json.loads(ex.read_text()).get("end"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(json.loads(ex.read_text())["exit"], 0)
+        self.ok("ingest", rid)
+
+    def test_no_launch_refused_for_a_role_that_launches(self):
+        """F-019: --no-launch on a lab.json role left a run open with no
+        worker."""
+        err = self.refused("new", "--brief", str(self.brief()), "--no-launch",
+                           "--role", "technician")
+        self.assertIn("--no-launch", err)
+        self.assertEqual(list((self.problem / "runs").glob("R-*"))
+                         if (self.problem / "runs").exists() else [], [])
+
+    def test_live_worker_is_never_overridden(self):
+        """F-011: --worker-done once bypassed a live process; the orphan kept
+        writing into a filed run."""
+        rid, _ = self.dispatch()
+        sleeper = subprocess.Popen(["/bin/sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        (self.problem / "runs" / rid / "execution.json").write_text(json.dumps(
+            {"pid": sleeper.pid, "start": "now"}))
+        self.packet(rid)
+        err = self.refused("ingest", rid, "--worker-done")
+        self.assertIn("kill %d" % sleeper.pid, err)
+        sleeper.kill(); sleeper.wait()
+        self.ok("ingest", rid, "--worker-done")
 
     def test_claim_ids_in_the_brief_are_recorded(self):
         b = self.brief("Use C-001 [verified] — the bound is 9. Do not re-derive.")
@@ -309,6 +424,23 @@ class TestHonestyTier(LabCase):
         self.assertEqual(rec["replay"]["exit"], 0)
         self.assertEqual(rec["warnings"], [])
 
+    def test_replay_runs_the_whole_block(self):
+        """F-001: the gate once ran only the first line of a block. Every
+        line runs, and a failing line fails the replay even when the last
+        line exits clean."""
+        rid, _ = self.dispatch()
+        self.packet(rid, command="printf '%s\\n' FIRST_LINE_OK\n"
+                                 "    printf '%s\\n' CHECK_OK")
+        self.ok("ingest", rid)
+        rec = self.ingest_json(rid)
+        self.assertIs(rec["replayed"], True)
+        self.assertEqual(rec["replay"]["command"].count("\n"), 1)
+
+        rid, _ = self.dispatch(self.brief("Again.", "b2.md"))
+        self.packet(rid, command="false\n    printf '%s\\n' CHECK_OK")
+        self.ok("ingest", rid)
+        self.assertIs(self.ingest_json(rid)["replayed"], False)
+
     def test_worker_self_grade_is_ignored(self):
         """Whatever a worker says about its own standing is not read at all:
         replayed is computed here, from the replay alone."""
@@ -319,6 +451,38 @@ class TestHonestyTier(LabCase):
         r = self.ok("ingest", rid)
         self.assertIs(self.ingest_json(rid)["replayed"], False)
         self.assertNotIn("machine-verified", r.stdout)
+
+    def test_checks_fills_reviewed_and_can_be_overridden(self):
+        """F-017/F-021: no worker was ever told about `reviewed`, so every
+        check left its target flagged. --checks at dispatch fills it in;
+        --reviewed at ingest corrects a packet that named the wrong run."""
+        first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
+        self.packet(first)
+        self.ok("ingest", first)
+        err = self.refused("new", "--brief", str(self.brief("x", "bx.md")),
+                           "--no-launch", "--role", "manual", "--checks", "R-042")
+        self.assertIn("no ingested run R-042", err)
+
+        err = self.refused("new", "--brief", str(self.brief("Referee.", "b2.md")),
+                           "--no-launch", "--role", "manual", "--checks", first)
+        self.assertIn("same", err)                          # F-013: same model
+        second, _ = self.dispatch(self.brief("Referee.", "b2.md"),
+                                  extra=["--model", "worker-b",
+                                         "--checks", first])
+        self.assertEqual(self.dispatch_json(second)["checks"], first)
+        self.packet(second, headline="It holds.")
+        r = self.ok("ingest", second)
+        self.assertIn("filled from the dispatch", r.stdout)
+        self.assertEqual(self.ingest_json(first)["reviewed_by"], [second])
+
+        third, _ = self.dispatch(self.brief("Referee again.", "b3.md"),
+                                 extra=["--model", "worker-c"])
+        self.packet(third, headline="Still holds.", ret={"reviewed": ["R-099"]})
+        self.refused("ingest", third)
+        r = self.ok("ingest", third, "--reviewed", first)
+        self.assertIn("set by the Director at ingest", r.stdout)
+        self.assertEqual(sorted(self.ingest_json(first)["reviewed_by"]),
+                         sorted([second, third]))
 
     def test_review_is_asserted_until_a_referee_run_checks_it(self):
         first, _ = self.dispatch(self.brief("Prove the bound.", "b1.md"))
@@ -449,6 +613,59 @@ class TestSpine(LabCase):
         self.assertIn("Still open:\n  nothing",
                       self.ok("catchup", "2020-01-01").stdout)
 
+    def test_status_lint_names_proposed_claims_written_as_fact(self):
+        """F-018, eight times: a proposed claim stated as settled and refuted
+        half an hour later. The lint names the sentence; the Director labels
+        it by hand — nothing rewrites STATUS.md."""
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed": ["The bound is 17."]})
+        r = self.ok("ingest", rid)
+        self.assertIn("1 run(s) ingested since: %s" % rid, r.stdout)
+        status = self.problem / "STATUS.md"
+        status.write_text("# Status: demo\n\n## Bottom line\n\nBy C-001, the "
+                          "bound is 17.\n\n## Ruled out\n\nC-001 is not a "
+                          "lower bound.\n")
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("states as settled what is only proposed", out)
+        self.assertIn('- C-001 in "Bottom line"', out)
+        self.assertNotIn('"Ruled out"', out)
+        status.write_text("# Status: demo\n\n## Bottom line\n\nBy C-001 "
+                          "(proposed, unreviewed), the bound is 17.\n")
+        self.assertNotIn("only proposed", self.ok("catchup", "2020-01-01").stdout)
+
+    def test_rotation_is_proposed_after_n_ingests_in_one_session(self):
+        """F-020: nothing said when a session had run long. The notice is
+        printed; rotation itself is the Investigator's call."""
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["machine"] = {"rotate_after_ingests": 2}
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        env = {"LAB_SESSION": "sess-1"}
+        for i in range(2):
+            rid, _ = self.dispatch(self.brief("q%d" % i, "b%d.md" % i))
+            self.packet(rid)
+            out = self.ok("ingest", rid, env=env).stdout
+        self.assertEqual(self.ingest_json(rid)["director_session"], "sess-1")
+        self.assertIn("Propose rotation", out)
+        rid, _ = self.dispatch(self.brief("q9", "b9.md"))
+        self.packet(rid)
+        self.assertNotIn("Propose rotation",
+                         self.ok("ingest", rid, env={"LAB_SESSION": "sess-2"}).stdout)
+
+    def test_stale_baselines_are_named_by_catchup(self):
+        """F-016: the baseline stood still while the public board moved."""
+        src = self.problem / "sources"
+        src.mkdir()
+        (src / "MANIFEST.md").write_text(
+            "- knauer_labs.csv — baseline, Knauer 2004 table, fetched "
+            "2020-01-01, sha256 abc\n"
+            "- board.json — baseline, live board, fetched %s, sha256 def\n"
+            "- paper.pdf — Packebusch–Mertens 2016, sha256 123\n"
+            % time.strftime("%Y-%m-%d", time.gmtime()))
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("Baselines older than 30 days", out)
+        self.assertIn("knauer_labs.csv", out)
+        self.assertNotIn("board.json", out)
+
     def test_refuses_outside_a_git_repo(self):
         loose = Path(tempfile.mkdtemp(prefix="nogit-"))
         self.addCleanup(shutil.rmtree, loose, ignore_errors=True)
@@ -466,9 +683,10 @@ class TestParallelFence(LabCase):
     def test_director_commits_do_not_implicate_a_worker(self):
         rid, _ = self.dispatch()
         self.packet(rid)
-        # The Director rewrites belief documents mid-flight, any subject line.
+        # The Director rewrites belief documents mid-flight, any subject line,
+        # naming the path — the guard refuses -A while a run is open.
         (self.problem / "STATUS.md").write_text("# Status: demo\n\nRewritten.\n")
-        git(self.root, "add", "-A")
+        git(self.root, "add", "problems/demo/STATUS.md")
         git(self.root, "commit", "-q", "-m",
             "Reduce remaining classification to three proof gates")
         self.ok("ingest", rid)
@@ -482,6 +700,44 @@ class TestParallelFence(LabCase):
         (sibling / "scratch.py").write_text("pass\n")     # uncommitted
         self.ok("ingest", rid)
         self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_another_problems_live_run_does_not_implicate_a_worker(self):
+        """Six problems ran workers at once; a live worker in one problem
+        was blamed on the run under ingest in another."""
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        other = self.root / "problems" / "other" / "runs" / "R-003" / "packet"
+        other.mkdir(parents=True)
+        (self.root / "problems" / "other" / "README.md").write_text("# other\n")
+        git(self.root, "add", "problems/other/README.md")
+        git(self.root, "commit", "-q", "-m", "second problem")
+        (other / "RESULT.md").write_text("# VERDICT: PENDING\n")  # uncommitted
+        self.ok("ingest", rid)
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+
+    def test_hand_commit_of_an_open_run_is_refused(self):
+        """F-010: seven hand commits in one day swept open runs' files into
+        unrelated amendments. The guard is installed at the first dispatch
+        and lets the scripts' own commits through."""
+        rid, _ = self.dispatch()
+        hook = self.root / ".git" / "hooks" / "pre-commit"
+        self.assertIn("guard-commit", hook.read_text())
+        self.packet(rid)
+        (self.problem / "STATUS.md").write_text("# Status: demo\n\nEdited.\n")
+        git(self.root, "add", "-A")
+        r = subprocess.run(["git", "commit", "-q", "-m", "lab.json + memory"],
+                           cwd=str(self.root), capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(rid, r.stderr)
+        self.assertIn("still open", r.stderr)
+        git(self.root, "reset", "-q")
+        git(self.root, "add", "problems/demo/STATUS.md")
+        self.assertEqual(git(self.root, "commit", "-q", "-m", "status").returncode, 0)
+        self.ok("ingest", rid)                       # the script's own commit passes
+        self.assertEqual(self.dispatch_json(rid)["status"], "ingested")
+        (self.problem / "runs" / rid / "note.txt").write_text("later\n")
+        git(self.root, "add", "-A")
+        self.assertEqual(git(self.root, "commit", "-q", "-m", "closed run").returncode, 0)
 
     def test_a_real_escape_is_still_caught_and_the_reason_kept(self):
         rid, _ = self.dispatch()
@@ -515,11 +771,17 @@ class TestFailureTaxonomy(LabCase):
         self.assertEqual(rec["claims"], [])
 
     def test_no_packet_files_as_harness_failure(self):
+        """F-009: with nothing on record, the reason is the Director's to
+        give, and it goes first."""
         rid, _ = self.dispatch()
-        r = self.ok("ingest", rid, "--record-broken")
+        err = self.refused("ingest", rid, "--record-broken")
+        self.assertIn("--reason", err)
+        r = self.ok("ingest", rid, "--record-broken",
+                    "--reason", "session quota ran out before launch")
         self.assertIn("HARNESS-FAILURE", r.stdout)
         self.assertEqual(self.ingest_json(rid)["verdict"], "HARNESS-FAILURE")
         self.assertIn("HARNESS-FAILURE", self.log())
+        self.assertIn("quota ran out", self.log())
 
     def test_pending_verdict_names_the_unfinished_worker(self):
         rid, _ = self.dispatch()
@@ -641,6 +903,136 @@ class TestAcceptedByInvestigator(LabCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("accepted on the Investigator's word",
                       self.ok("catchup", "2020-01-01").stdout)
+
+
+class TestTranscripts(LabCase):
+    """The worker's own session file, copied into the record at ingest. Its
+    stdout is in worker.log; the reasoning and tool calls behind a result
+    live in one command's private store, on one machine, pruned on its own
+    schedule."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = Path(tempfile.mkdtemp(prefix="labsessions-"))
+        self.addCleanup(shutil.rmtree, self.store, ignore_errors=True)
+
+    def configure(self, transcript=None, **lab):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        if transcript is not None:
+            cfg["roles"]["manual"]["transcript"] = transcript
+        cfg.update(lab)
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+
+    def session(self, path, cwd=None, body="thought\n"):
+        """A session file in the shape these stores write: JSON per line,
+        the working directory in the first one."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"type": "meta", "cwd": str(cwd or "")})
+                     + "\n" + json.dumps({"type": "text", "body": body}) + "\n")
+        return p
+
+    def rundir(self, rid):
+        return (self.problem / "runs" / rid).resolve()
+
+    def transcript_json(self, rid):
+        return self.ingest_json(rid)["transcript"]
+
+    def stored_bytes(self, rid):
+        return gzip.decompress((self.problem / "runs" / rid /
+                                "session.jsonl.gz").read_bytes())
+
+    def sha(self, path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def test_first_line_cwd_picks_this_runs_session_not_the_newest(self):
+        self.configure({"glob": str(self.store / "*.jsonl"),
+                        "match": "first-line-cwd"})
+        rid, _ = self.dispatch()
+        mine = self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
+        theirs = self.session(self.store / "b.jsonl", cwd=self.store,
+                              body="another run's session\n")
+        os.utime(theirs, (time.time() + 5, time.time() + 5))   # newer
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIn("Transcript stored", r.stdout)
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+        rec = self.transcript_json(rid)
+        self.assertEqual(rec["sha256"], self.sha(mine))
+        self.assertEqual(rec["bytes"], mine.stat().st_size)
+        self.assertIs(rec["stored"], True)
+        self.assertEqual(rec["source"], str(mine))
+        # It went into the record with the run, not left on the disk.
+        path = "problems/demo/runs/%s/session.jsonl.gz" % rid
+        self.assertEqual(git(self.root, "ls-files", "--", path).stdout.strip(),
+                         path)
+        self.assertIn("%s ingested" % rid,
+                      git(self.root, "log", "-1", "--name-only",
+                          "--pretty=%s", "--", path).stdout)
+
+    def test_path_rule_finds_a_folder_named_after_the_working_directory(self):
+        self.configure({"glob": str(self.store / "{cwd_dashed}" / "*.jsonl"),
+                        "match": "path"})
+        rid, _ = self.dispatch()
+        dashed = str(self.rundir(rid)).replace("/", "-")
+        mine = self.session(self.store / dashed / "s.jsonl")
+        self.packet(rid)
+        self.ok("ingest", rid)
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+        self.assertEqual(self.transcript_json(rid)["sha256"], self.sha(mine))
+
+    def test_over_the_cap_it_is_described_but_not_copied(self):
+        self.configure({"glob": str(self.store / "*.jsonl"),
+                        "match": "first-line-cwd"},
+                       transcripts={"max_mb": 0.000001})
+        rid, _ = self.dispatch()
+        mine = self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIn("over transcripts.max_mb", r.stdout)
+        self.assertIn(str(mine), r.stdout)                  # where it lives
+        rec = self.transcript_json(rid)
+        self.assertIs(rec["stored"], False)
+        self.assertEqual(rec["sha256"], self.sha(mine))
+        self.assertGreater(rec["gzipped_bytes"], 0)
+        self.assertFalse((self.problem / "runs" / rid /
+                          "session.jsonl.gz").exists())
+
+    def test_the_flag_wins_over_discovery(self):
+        """A worker the Director drove itself leaves its session where no
+        role rule looks."""
+        self.configure({"glob": str(self.store / "found-*.jsonl"),
+                        "match": "first-line-cwd"})
+        rid, _ = self.dispatch()
+        self.session(self.store / "found-a.jsonl", cwd=self.rundir(rid))
+        named = self.session(self.store / "by-hand.jsonl", body="the real one\n")
+        self.packet(rid)
+        self.ok("ingest", rid, "--transcript", str(named))
+        self.assertEqual(self.stored_bytes(rid), named.read_bytes())
+        self.assertEqual(self.transcript_json(rid)["source"], str(named))
+        err = self.refused("ingest", "R-404", "--transcript", str(named))
+        self.assertIn("no run R-404", err)
+
+    def test_a_run_filed_broken_keeps_its_transcript_too(self):
+        self.configure({"glob": str(self.store / "*.jsonl"),
+                        "match": "first-line-cwd"})
+        rid, _ = self.dispatch()
+        mine = self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
+        self.packet(rid, ret_text="{ not json at all")
+        self.refused("ingest", rid)
+        self.ok("ingest", rid, "--record-broken")
+        self.assertEqual(self.ingest_json(rid)["verdict"], "UNINGESTABLE")
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+        self.assertIs(self.transcript_json(rid)["stored"], True)
+
+    def test_a_role_with_no_rule_files_the_run_without_one(self):
+        rid, _ = self.dispatch()
+        self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIsNone(self.transcript_json(rid))
+        self.assertNotIn("Transcript stored", r.stdout)
+        self.assertIn("none on record", self.ok("lint", rid).stdout)
 
 
 class TestDuplicateWarningLifecycle(LabCase):
