@@ -338,6 +338,43 @@ def make_id(kind, tag, number):
     return "%s-%s%03d" % (kind, tag + "-" if tag else "", number)
 
 
+def first_id(text):
+    """The claim ID in a command's output, whatever else it printed beside
+    it. Callers read the ID from the line that is only an ID, so a line of
+    guidance can be added without breaking them."""
+    for line in text.splitlines():
+        if CLAIM_ID.match(line.strip()):
+            return line.strip()
+    return ""
+
+
+def next_step(cid, status):
+    """The one line printed with a new ID saying what would settle it. A
+    claim stated and then left at proposed is the commonest way a result
+    never becomes evidence."""
+    if status == "proposed":
+        return ("%s is proposed — stated, nothing settles it. Dispatch a run "
+                "that attacks it, then `claims.py set %s verified --evidence "
+                "<run> --rests-on <ids|none>` once that run is ingested."
+                % (cid, cid))
+    return ("%s is %s: recorded on the evidence given, not re-derived here. "
+            "Any claim of ours resting on it is conditional until we check it "
+            "ourselves." % (cid, status))
+
+
+def resolve_actor(given, tag):
+    """Who a change is credited to. In a lab whose investigators have
+    joined, that is the caller's own tag unless they say otherwise; in a lab
+    with none, there is nobody to assume, and the credit has to be stated."""
+    if given:
+        return given
+    if not tag:
+        refuse("this needs --actor: who is making the change. In a lab whose "
+               "investigators have joined it defaults to your own tag, but "
+               "nobody has joined here, so say who to credit.")
+    return tag
+
+
 # ---------------------------------------------------------------- ledger
 
 def ledger_path(problem, tag=None):
@@ -639,9 +676,54 @@ def run_on_record(problem, run_id):
 
 # ---------------------------------------------------------------- commands
 
+# The two statuses a claim may be recorded in at birth: neither rests on a
+# run of ours, so there is nothing about them for a later command to check.
+CITED = ("externally-established", "accepted-by-investigator")
+
+
+def check_citation(cid, target, evidence):
+    """What the two cited statuses need on record. Checked in one place,
+    whether the status is given at birth or set later, so the same claim
+    cannot enter by the easier door."""
+    if target == "accepted-by-investigator":
+        if not evidence:
+            refuse("accepting %s on the Investigator's word still needs "
+                   "--evidence saying why and when, e.g. \"Investigator "
+                   "instruction 2026-08-23: take the theorem as proved; the "
+                   "thesis is embargoed\". The decision is the evidence, and "
+                   "it must be on the record." % cid)
+        if RUN_ID.match(evidence):
+            refuse("%s is a run. accepted-by-investigator records a decision, "
+                   "not a run — describe the instruction in --evidence, or set "
+                   "the claim verified with that run instead." % evidence)
+    elif target == "externally-established":
+        if not evidence:
+            refuse("recording %s as externally-established needs --evidence with "
+                   "the citation — who published it, and where. A claim with no "
+                   "source named stays proposed." % cid)
+        if RUN_ID.match(evidence):
+            refuse("%s is a run of our own, not a citation. Our own run makes a "
+                   "claim verified, not externally-established. Pass the "
+                   "published source to --evidence, or set %s verified instead."
+                   % (evidence, cid))
+
+
 def cmd_new(args):
     problem = find_problem(args.problem)
     tag = require_own_branch(git_root(problem), "a new claim")
+    actor = resolve_actor(args.actor, tag)
+    target = args.status or "proposed"
+    evidence = (args.evidence or "").strip()
+    if target != "proposed":
+        if target not in CITED:
+            refuse("a claim is stated as proposed and moves from there. Only "
+                   "%s may be recorded in the same breath as the statement, "
+                   "because neither rests on work of ours: one cites the "
+                   "literature, the other the Investigator's decision. %s needs "
+                   "an ingested run that checked it, so state the claim now and "
+                   "`claims.py set` it after that run is on record."
+                   % (" and ".join(CITED), target))
+        check_citation("this claim", target, evidence)
     rests = []
     for chunk in args.rests_on or []:
         rests += [x.strip() for x in chunk.split(",") if x.strip()]
@@ -654,19 +736,31 @@ def cmd_new(args):
         if r not in known:
             print("Warning: this claim rests on %s, which is not a claim here "
                   "yet. `claims.py check` will keep flagging it." % r)
-    cid = allocate(problem, args.actor, tag)
-    append(problem, {"event": "new", "id": cid, "ts": now(), "actor": args.actor,
-                     "status": "proposed", "statement": args.statement.strip(),
-                     "conditions": (args.conditions or "").strip(), "rests_on": rests,
-                     "hash": text_hash(args.statement, args.conditions or "")}, tag)
+    statement, conditions = args.statement.strip(), (args.conditions or "").strip()
+    cid = allocate(problem, actor, tag)
+    append(problem, {"event": "new", "id": cid, "ts": now(), "actor": actor,
+                     "status": "proposed", "statement": statement,
+                     "conditions": conditions, "rests_on": rests,
+                     "hash": text_hash(statement, conditions)}, tag)
+    if target != "proposed":
+        # One command, one commit: a claim that is only ever a citation
+        # should not need two, and the gap between them is where a claim
+        # sits at proposed in the views while the source is already known.
+        append(problem, {"event": "set", "id": cid, "ts": now(), "actor": actor,
+                         "from": "proposed", "to": target, "evidence": evidence,
+                         "by": None, "statement": statement,
+                         "conditions": conditions,
+                         "hash": text_hash(statement, conditions)}, tag)
     regenerate(problem)
-    commit(problem, "%s new (proposed)" % cid)
+    commit(problem, "%s new (%s)" % (cid, target))
     print(cid)
+    print(next_step(cid, target))
 
 
 def cmd_set(args):
     problem = find_problem(args.problem)
     tag = require_own_branch(git_root(problem), "a status change")
+    actor = resolve_actor(args.actor, tag)
     claims, _ = load(problem)
     cid, target = args.claim, args.status
     if target not in STATUSES:
@@ -707,11 +801,11 @@ def cmd_set(args):
             refuse("there is no ingested run %s: it %s. Only a run that `run.py "
                    "ingest` accepted counts, so ingest it clean first, then "
                    "verify %s." % (evidence, why, cid))
-        if args.actor.strip().casefold() == c["discoverer"].strip().casefold():
+        if actor.strip().casefold() == c["discoverer"].strip().casefold():
             refuse("%s was discovered by %s, so %s cannot verify it. Whoever "
                    "found a result never confirms it. Have a different actor "
                    "check the statement in its own run, and pass that actor to "
-                   "--actor." % (cid, c["discoverer"], args.actor))
+                   "--actor." % (cid, c["discoverer"], actor))
         ev_model = run_model(problem, evidence)
         disc_run = discovering_run(problem, cid)
         disc_model = run_model(problem, disc_run) if disc_run else None
@@ -767,27 +861,8 @@ def cmd_set(args):
             refuse("%s rests on %s, so it cannot be verified yet. Verify "
                    "what it rests on first, or set %s conditional."
                    % (cid, "; ".join(bad), cid))
-    elif target == "accepted-by-investigator":
-        if not evidence:
-            refuse("accepting %s on the Investigator's word still needs "
-                   "--evidence saying why and when, e.g. \"Investigator "
-                   "instruction 2026-08-23: take Steen's theorem as proved; "
-                   "thesis embargoed\". The decision is the evidence, and it "
-                   "must be on the record." % cid)
-        if RUN_ID.match(evidence):
-            refuse("%s is a run. accepted-by-investigator records a decision, "
-                   "not a run — describe the instruction in --evidence, or set "
-                   "the claim verified with that run instead." % evidence)
-    elif target == "externally-established":
-        if not evidence:
-            refuse("recording %s as externally-established needs --evidence with "
-                   "the citation — who published it, and where. A claim with no "
-                   "source named stays proposed." % cid)
-        if is_run:
-            refuse("%s is a run of our own, not a citation. Our own run makes a "
-                   "claim verified, not externally-established. Pass the "
-                   "published source to --evidence, or set %s verified instead."
-                   % (evidence, cid))
+    elif target in CITED:
+        check_citation(cid, target, evidence)
     elif target == "superseded":
         if not args.by:
             refuse("superseding %s needs --by naming the claim that replaces it, "
@@ -824,7 +899,7 @@ def cmd_set(args):
     if statement != c["statement"] or conditions != c["conditions"]:
         print("Note: the statement or conditions in %s.md differ from the "
               "ledger. Recording the file's wording as the claim's text." % cid)
-    rec = {"event": "set", "id": cid, "ts": now(), "actor": args.actor,
+    rec = {"event": "set", "id": cid, "ts": now(), "actor": actor,
            "from": old, "to": target, "evidence": evidence or None,
            "by": args.by, "statement": statement, "conditions": conditions,
            "hash": text_hash(statement, conditions)}
@@ -904,6 +979,12 @@ def main(argv=None):
     n.add_argument("--conditions", default="")
     n.add_argument("--rests-on", action="append", dest="rests_on",
                    help="claim ID this one depends on; repeat or comma separate")
+    n.add_argument("--status", default="proposed",
+                   help="record the claim straight into %s, in one command "
+                        "with its --evidence; every other status is reached "
+                        "with `set`" % " or ".join(CITED))
+    n.add_argument("--evidence", help="with --status: the citation, or the "
+                                      "Investigator's recorded decision")
     n.set_defaults(func=cmd_new)
 
     s = sub.add_parser("set", help="change a claim's status")
@@ -932,7 +1013,9 @@ def main(argv=None):
         q.add_argument("--problem", help="the problem directory (default: found "
                                          "by walking up from here)")
     for q in (n, s):
-        q.add_argument("--actor", required=True, help="who is making this change")
+        q.add_argument("--actor", help="who is making this change (default: "
+                                       "your investigator tag, once anyone "
+                                       "has joined the lab)")
 
     args = p.parse_args(argv)
     args.func(args)

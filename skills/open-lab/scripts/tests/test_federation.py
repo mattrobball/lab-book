@@ -172,6 +172,25 @@ class TestJoin(FederationCase):
         self.assertIn("branch: lab/alice", who)
         self.assertIn("unpushed: 0", who)
 
+    def test_join_scaffolds_the_ignore_file_and_credits_by_tag(self):
+        self.join(self.alice)
+        text = (self.alice / ".gitignore").read_text()
+        self.assertIn("__pycache__/", text)
+        self.assertIn("*.pyc", text)
+        self.assertIn(".gitignore", git(self.alice, "show", "--name-only",
+                                        "--pretty=", "HEAD").stdout)
+        # With an investigator on record, who is doing this is no longer a
+        # question anyone has to answer twice.
+        cid = self.claims_ok(self.alice, "new", "--statement",
+                             "A holds.").stdout.splitlines()[0].strip()
+        view = (self.problem(self.alice) / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Discovered by:** alice", view)
+        self.ok(self.alice, "note", "--headline", "A decision",
+                "--body", "Taken in conversation.")
+        entry = sorted((self.problem(self.alice) / "notebook" /
+                        "entries").glob("N-*.md"))[-1].read_text()
+        self.assertIn("**Actor:** alice", entry)
+
     def test_a_tag_taken_by_someone_else_is_refused(self):
         self.join(self.alice)
         git(self.alice, "config", "user.name", "ALICE")   # same tag
@@ -329,7 +348,7 @@ class TestStreams(FederationCase):
     def test_status_is_the_latest_event_across_streams_and_rebuild_shows_it(self):
         self.join(self.alice)
         cid = self.claims_ok(self.alice, "new", "--statement", "A holds.",
-                             "--actor", "director").stdout.strip().splitlines()[-1]
+                             "--actor", "director").stdout.splitlines()[0].strip()
         self.assertEqual(cid, "C-alice-001")
         # A second stream, as a merge from another branch would leave it.
         other = self.problem(self.alice) / "claims" / "ledger-bob.jsonl"
@@ -439,6 +458,15 @@ class TestMeeting(FederationCase):
         self.assertEqual(git(self.bob, "rev-parse", "HEAD").stdout.strip(), head)
         self.assertEqual(self.branch(self.alice), "lab/alice")
         self.assertEqual(git(self.alice, "status", "--porcelain").stdout.strip(), "")
+
+    def test_catchup_defaults_to_the_last_meeting(self):
+        self.join(self.alice)
+        self.work(self.alice, headline="Before the meeting.")
+        self.ok(self.alice, "reconcile", cwd=self.alice)
+        self.ok(self.alice, "reconcile", "--close", "--present", "alice",
+                cwd=self.alice)
+        out = self.ok(self.alice, "catchup").stdout
+        self.assertIn("Since the last meeting", out)
 
     def test_one_investigator_reconciles_to_an_empty_agenda(self):
         self.join(self.alice)

@@ -42,18 +42,43 @@ which workers exist, how they launch, what they are for, and whether they
 are on hold. One lab kept "stalls on reading-heavy tasks" in a memory
 instead, and sent that worker three more reading-heavy tasks.
 
+Every key the scripts read, in one example:
+
 ```json
 {
-  "roles": {"technician": {"model": "<your-model>",
-    "command": "<your-cli> --model <your-model> --prompt-file {prompt}",
-    "note": "for: small generation jobs. not for: reading-heavy tasks",
-    "unavailable_until": "2026-09-01"}},
-  "tools": ["<confirmed-tool>", "<confirmed-tool>"]
+  "roles": {
+    "technician": {
+      "model": "<your-model>",
+      "command": "<your-cli> --model <your-model> --prompt-file {prompt}",
+      "note": "for: small generation jobs. not for: reading-heavy tasks",
+      "unavailable_until": "2026-09-01",
+      "worker_timeout": 14400,
+      "memory_gb": 10,
+      "usage_pattern": "(?P<tokens>[\\d,]+) tokens",
+      "transcript": {"glob": "~/<store>/**/*.jsonl", "match": "first-line-cwd"}
+    }
+  },
+  "tools": ["<confirmed-tool>", "<confirmed-tool>"],
+  "machine": {"max_heavy_runs": 2, "rotate_after_ingests": 12},
+  "transcripts": {"max_mb": 20},
+  "sources": {"refetch_days": 30},
+  "investigators": {}
 }
 ```
 
-The skill ships no models or commands. `note` and `unavailable_until` are
-optional. `run.py new` refuses a dispatch to a role on hold, printing the
+Only `roles.<role>.model` and, for a role that launches itself, `command`
+are needed. `note` is printed at every dispatch; `unavailable_until` is a
+date, and lifts itself. `worker_timeout` and `memory_gb` are the default
+budgets a run is watched against. `usage_pattern` is a regex with named
+groups read over the worker's log when the built-in token shapes do not fit.
+`transcript` says where that worker's session file lives ("Transcripts").
+`machine.max_heavy_runs` is the Director's ceiling on compute-heavy workers
+at once; `machine.rotate_after_ingests` is when a session is told it has run
+long. `transcripts.max_mb` caps what is copied into the record;
+`sources.refetch_days` is when a baseline is called stale. `investigators`
+is written by `run.py join` — never by hand.
+
+The skill ships no models or commands. `run.py new` refuses a dispatch to a role on hold, printing the
 note, and dispatches normally once the date has passed, so nobody has to
 remember to lift the hold; catchup lists the roles currently held. A hold is
 a date, never a bare flag — a flag goes stale the day the quota resets. The
@@ -84,7 +109,7 @@ boards update: catchup flags any baseline line fetched more than
 ## Joining a lab
 
 Every investigator runs `run.py join` once per clone, before their first
-write. It makes a **tag** from git's `user.name` (lowercase, letters and
+write; in a fresh lab it makes the first commit itself. It makes a **tag** from git's `user.name` (lowercase, letters and
 digits, at most twelve), registers the person in `lab.json` under
 `investigators`, creates the branch `lab/<tag>`, and checks it out. Run it
 again and it only checks the branch out; it refuses when the tag is already
@@ -183,6 +208,17 @@ impossibility results are ordinary claims and untouched by this rule.
 Dispatch when you can state the goal and a worker with no context could tell
 whether it succeeded. Do not dispatch to save yourself reading, or a question
 you have not decided how to grade.
+
+**While a worker runs, commit every edit you make, naming its path.** The
+fence at ingest counts every uncommitted file outside the run's own paths
+against that run, and the refusal names the worker — so a note you left
+open in the editor is filed as the worker writing where it should not.
+Commit your own work as you go and the fence only ever sees the worker's.
+
+Briefs live in the problem's `briefs/`, one file per brief, named
+`B-NNN-<short-slug>.md` — the number ties it to the run that carries it, the
+slug says what it asks. `run.py new` commits the brief itself along with the
+run, so what a worker was asked is in the history beside what it returned.
 
 Write the brief from `templates/BRIEF.md`. Everything the worker needs goes in
 it — paste the claims and file contents it may rely on rather than pointing at
@@ -346,8 +382,10 @@ and three spellings of the run directory — `{cwd}`, `{cwd_dashed}` (every
 `/` replaced by `-`), `{cwd_urlencoded}` — because the stores that name a
 folder after the working directory each mangle it differently. `match` is
 `path`, which takes the newest match inside the run's own start-to-end
-window, or `first-line-cwd`, which keeps only files whose first line is JSON
-naming this run directory as its `cwd`. As shapes: a command that writes one
+window, or `first-line-cwd`, which keeps only files whose first line is JSON naming
+this run directory as its `cwd` — checked both at the top level of that
+record and one level down inside it, because commands differ on where they
+put it. As shapes: a command that writes one
 JSONL per session under a date tree and puts the working directory in the
 first line wants `first-line-cwd`; one that names the session folder after
 the working directory wants `path` with `{cwd_urlencoded}` or
@@ -362,7 +400,11 @@ be fetched by hand while that machine exists. Nothing found means
 `transcript: null` and one line saying so; a thin record is never a refusal.
 `ingest --transcript <path>` names the file yourself, for a worker the
 Director drove in its own session, where no role rule looks. `run.py lint`
-says whether a run has one.
+says whether a run has one, and catchup names every ingested run whose role
+says where to look and that has nothing stored. `run.py transcript <run>`
+attaches one afterwards — by the role's rule, or `--path` — for the run
+whose rule was wrong on the day, or whose store was still writing;
+`--replace` swaps one already on record, and the swap is in the history.
 
 ## The commit guard
 
@@ -383,8 +425,9 @@ Investigator. Without it the only thinking on record is a worker's.
 
 ## Catchup
 
-`run.py catchup` lists the runs, verdicts, and claim changes since a commit or
-a date, then the standing lints: runs needing attention, reviews owed
+`run.py catchup` lists the runs, verdicts, and claim changes since a commit
+or a date — with none given, since the last meeting, or the last seven days
+when there has not been one, saying which it used — then the standing lints: runs needing attention, reviews owed
 (aggregated, cleared by a referee or `run.py waive-review`), unresolved
 duplicate-claim warnings, verified claims resting on unverified ones, claims
 accepted on the Investigator's word, promotions with no model independence,

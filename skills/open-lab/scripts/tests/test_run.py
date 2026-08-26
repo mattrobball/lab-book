@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import time
 import unittest
 from pathlib import Path
 
+ID_LINE = re.compile(r"^C-(?:[a-z0-9][a-z0-9-]*-)?\d+$")
 SCRIPTS = Path(__file__).resolve().parent.parent
 RUN = SCRIPTS / "run.py"
 CLAIMS = SCRIPTS / "claims.py"
@@ -73,7 +75,8 @@ class LabCase(unittest.TestCase):
     def claims_py(self, *args, **kw):
         r = self.script(CLAIMS, *args, **kw)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        return r.stdout.strip().splitlines()[-1]
+        ids = [l.strip() for l in r.stdout.splitlines() if ID_LINE.match(l.strip())]
+        return ids[0] if ids else r.stdout.strip().splitlines()[-1]
 
     # -- lab fixtures ----------------------------------------------------
     def brief(self, text="Count the caps.", name="b1.md"):
@@ -905,6 +908,69 @@ class TestAcceptedByInvestigator(LabCase):
                       self.ok("catchup", "2020-01-01").stdout)
 
 
+class TestHousekeeping(LabCase):
+
+    def test_catchup_with_no_date_uses_the_last_week(self):
+        """A session that opens by asking the Director to pick a date starts
+        by getting it wrong."""
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        self.ok("ingest", rid)
+        out = self.ok("catchup").stdout
+        self.assertIn("Since the last seven days", out)
+        self.assertIn("%s PASS" % rid, out)
+
+    def test_dispatch_writes_and_commits_a_gitignore(self):
+        """A byte-compiled file left under a run counts against the worker
+        that never wrote it."""
+        self.assertFalse((self.root / ".gitignore").exists())
+        self.dispatch()
+        text = (self.root / ".gitignore").read_text()
+        self.assertIn("__pycache__/", text)
+        self.assertIn("*.pyc", text)
+        self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
+
+    def test_an_existing_gitignore_is_added_to_not_replaced(self):
+        (self.root / ".gitignore").write_text("secrets.env\n")
+        self.dispatch()
+        text = (self.root / ".gitignore").read_text()
+        self.assertIn("secrets.env", text)
+        self.assertIn("__pycache__/", text)
+        self.dispatch(self.brief("Again.", "b2.md"))          # idempotent
+        self.assertEqual((self.root / ".gitignore").read_text(), text)
+
+    def echoing_role(self, line, pattern=None):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["roles"]["echoer"] = {"model": "worker-a",
+                                  "command": "/bin/sh -c 'echo \"%s\"' {prompt}"
+                                             % line}
+        if pattern:
+            cfg["roles"]["echoer"]["usage_pattern"] = pattern
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+
+    def test_token_counts_are_read_however_the_worker_prints_them(self):
+        """A count reported in one shape only is a count missing from every
+        other worker's record."""
+        shapes = [("tokens used: 1,234", "1,234"), ("tokens: 987", "987"),
+                  ("12.5K tokens", "12.5K")]
+        for i, (line, expected) in enumerate(shapes):
+            self.echoing_role(line)
+            r = self.ok("new", "--brief", str(self.brief("Shape %d." % i,
+                                                         "b%d.md" % i)),
+                        "--role", "echoer")
+            rid = r.stdout.split()[0]
+            e = json.loads((self.problem / "runs" / rid /
+                            "execution.json").read_text())
+            self.assertEqual(e["usage"], {"tokens": expected}, line)
+        # A role's own named-group pattern still wins.
+        self.echoing_role("spent 5 credits", r"spent (?P<cost>\d+) credits")
+        r = self.ok("new", "--brief", str(self.brief("Own pattern.", "bp.md")),
+                    "--role", "echoer")
+        rid = r.stdout.split()[0]
+        e = json.loads((self.problem / "runs" / rid / "execution.json").read_text())
+        self.assertEqual(e["usage"], {"cost": "5"})
+
+
 class TestTranscripts(LabCase):
     """The worker's own session file, copied into the record at ingest. Its
     stdout is in worker.log; the reasoning and tool calls behind a result
@@ -1025,6 +1091,63 @@ class TestTranscripts(LabCase):
         self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
         self.assertIs(self.transcript_json(rid)["stored"], True)
 
+    def test_a_nested_working_directory_is_found_too(self):
+        """Some commands put the working directory one level down in their
+        first record; a rule that knew only the flat shape found nothing."""
+        self.configure({"glob": str(self.store / "*.jsonl"),
+                        "match": "first-line-cwd"})
+        rid, _ = self.dispatch()
+        mine = self.store / "nested.jsonl"
+        mine.write_text(json.dumps({"type": "meta",
+                                    "payload": {"cwd": str(self.rundir(rid))}})
+                        + "\n" + json.dumps({"type": "text"}) + "\n")
+        self.packet(rid)
+        self.ok("ingest", rid)
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+
+    def test_a_transcript_can_be_attached_after_the_run_is_on_record(self):
+        """Discovery runs at ingest, when the session file is freshest. A
+        rule that was wrong then would otherwise lose the reasoning behind a
+        filed run for good."""
+        rid, _ = self.dispatch()
+        mine = self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
+        err = self.refused("transcript", rid)
+        self.assertIn("no ingest record", err)
+
+        self.packet(rid)
+        self.ok("ingest", rid)                       # no rule yet: none stored
+        self.assertIsNone(self.transcript_json(rid))
+        self.configure({"glob": str(self.store / "*.jsonl"),
+                        "match": "first-line-cwd"})
+        r = self.ok("transcript", rid)
+        self.assertIn("transcript on record", r.stdout)
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+        self.assertEqual(self.transcript_json(rid)["sha256"], self.sha(mine))
+        self.assertIn("%s: transcript attached" % rid, self.log())
+
+        err = self.refused("transcript", rid)
+        self.assertIn("--replace", err)
+        other = self.session(self.store / "by-hand.jsonl", body="the real one\n")
+        self.ok("transcript", rid, "--path", str(other), "--replace")
+        self.assertEqual(self.stored_bytes(rid), other.read_bytes())
+        self.assertEqual(self.transcript_json(rid)["source"], str(other))
+
+    def test_runs_missing_a_transcript_are_named_by_catchup(self):
+        self.configure({"glob": str(self.store / "nothing-*.jsonl"),
+                        "match": "path"})
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIn("No transcript found", r.stdout)
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("no transcript stored", out)
+        self.assertIn(rid, out.split("Attention:")[1])
+        # Closable: attach one and the line goes.
+        named = self.session(self.store / "by-hand.jsonl")
+        self.ok("transcript", rid, "--path", str(named))
+        self.assertNotIn("no transcript stored",
+                         self.ok("catchup", "2020-01-01").stdout)
+
     def test_a_role_with_no_rule_files_the_run_without_one(self):
         rid, _ = self.dispatch()
         self.session(self.store / "a.jsonl", cwd=self.rundir(rid))
@@ -1033,6 +1156,9 @@ class TestTranscripts(LabCase):
         self.assertIsNone(self.transcript_json(rid))
         self.assertNotIn("Transcript stored", r.stdout)
         self.assertIn("none on record", self.ok("lint", rid).stdout)
+        # Nothing to flag either: the lab never said where to look.
+        self.assertNotIn("no transcript stored",
+                         self.ok("catchup", "2020-01-01").stdout)
 
 
 class TestDuplicateWarningLifecycle(LabCase):

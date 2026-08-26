@@ -5,6 +5,7 @@ Run from open-lab/scripts/tests/:  python3 -m unittest
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,9 +16,18 @@ from pathlib import Path
 CLAIMS = Path(__file__).resolve().parent.parent / "claims.py"
 
 
+ID_LINE = re.compile(r"^C-(?:[a-z0-9][a-z0-9-]*-)?\d+$")
+
+
 def git(cwd, *args):
     return subprocess.run(["git"] + list(args), cwd=str(cwd), check=True,
                           capture_output=True, text=True)
+
+
+def claim_id(out):
+    """The allocated ID from `claims.py new`, which also prints one line
+    saying what would settle the claim."""
+    return next(l.strip() for l in out.splitlines() if ID_LINE.match(l.strip()))
 
 
 class LabCase(unittest.TestCase):
@@ -58,7 +68,7 @@ class LabCase(unittest.TestCase):
         args = ["new", "--statement", statement, "--actor", actor]
         for k, v in kw.items():
             args += ["--" + k.replace("_", "-"), v]
-        return self.ok(*args).stdout.strip().splitlines()[-1]
+        return claim_id(self.ok(*args).stdout)
 
     def ingest_run(self, run_id="R-007", verdict="PASS"):
         d = self.problem / "runs" / run_id / "packet"
@@ -215,6 +225,56 @@ class TestPromotionGates(LabCase):
                 "--rests-on", "none")
         self.ok("set", dep, "verified", "--actor", "bob", "--evidence", "R-002")
         self.assertEqual(self.status_of(dep), "verified")
+
+
+class TestStatusAtBirth(LabCase):
+    """A claim that only ever cites a source should not need two commands
+    and two commits to say so."""
+
+    def test_a_citation_is_recorded_with_the_statement(self):
+        r = self.ok("new", "--statement", "The spectrum is known.",
+                    "--actor", "director", "--status", "externally-established",
+                    "--evidence", "Erdos 1962, Acta Math 7, p. 12")
+        cid = claim_id(r.stdout)
+        self.assertEqual(self.status_of(cid), "externally-established")
+        self.assertIn("recorded on the evidence given", r.stdout)
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("**Status:** externally-established", view)
+        self.assertIn("Erdos 1962", view)
+        log = git(self.root, "log", "--pretty=%s").stdout
+        self.assertIn("%s new (externally-established)" % cid, log)
+        self.assertNotIn("proposed -> externally-established", log)
+
+    def test_the_investigators_decision_likewise(self):
+        cid = claim_id(self.ok("new", "--statement", "Take it as proved.",
+                               "--actor", "director", "--status",
+                               "accepted-by-investigator", "--evidence",
+                               "Investigator instruction 2026-08-23: thesis "
+                               "embargoed").stdout)
+        self.assertEqual(self.status_of(cid), "accepted-by-investigator")
+
+    def test_the_statuses_that_need_a_run_are_refused_at_birth(self):
+        err = self.refused("new", "--statement", "A holds.", "--actor", "bob",
+                           "--status", "verified", "--evidence", "R-007")
+        self.assertIn("needs an ingested run", err)
+        err = self.refused("new", "--statement", "A holds.", "--actor", "bob",
+                           "--status", "externally-established")
+        self.assertIn("citation", err)
+        err = self.refused("new", "--statement", "A holds.", "--actor", "bob",
+                           "--status", "externally-established",
+                           "--evidence", "R-007")
+        self.assertIn("not a citation", err)
+        self.assertFalse((self.problem / "claims" / "ledger.jsonl").exists())
+
+    def test_a_new_claim_says_what_would_settle_it(self):
+        r = self.ok("new", "--statement", "A holds.", "--actor", "alice")
+        self.assertIn("Dispatch a run that attacks it", r.stdout)
+        self.assertIn("set %s verified" % claim_id(r.stdout), r.stdout)
+
+    def test_without_an_investigator_the_actor_is_still_required(self):
+        err = self.refused("new", "--statement", "A holds.")
+        self.assertIn("--actor", err)
+        self.assertIn("nobody has joined", err)
 
 
 class TestCheck(LabCase):

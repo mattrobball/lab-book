@@ -61,13 +61,17 @@ These are binding, not advice.
    status change — never chain a `claims.py set` after an ingest in one
    command; if the ingest is refused, the status change still fires.
 5. **Adjudicate** — read the packet yourself, then set claim status with
-   `claims.py` as a separate, deliberate act. Verifying names the evidence
-   run and what the claim rests on; file the reasoning as a `run.py note`
+   `claims.py` as a separate, deliberate act. Before verifying, open the
+   referee's verifier and confirm it recomputes the result rather than
+   asserting it: a marker printed from a hard-coded list replays clean and
+   passes ingest, and a lab's worst hour began with one. Verifying names the
+   evidence run and what the claim rests on; file the reasoning as a `run.py note`
    while it is fresh. If you catch yourself doing the mathematics here, you
    may — but your work is a lead, never evidence: it enters the record only
    through a Technician who checks it adversarially like anyone else's claim.
-6. **Update** — move anything reusable the run built into the problem's
-   `tools/`, cached sources into `sources/` with their hashes, the packet's
+6. **Update** — copy anything reusable the run built into the problem's
+   `tools/` (copy, never move: a filed run is never edited, and its packet
+   has to keep working exactly as it was replayed), cached sources into `sources/` with their hashes, the packet's
    `## Leads` into "Ruled out" lines and open questions, and rewrite
    `STATUS.md` and `OPEN_QUESTIONS.md` to say what you now believe. A
    claim still `proposed` appears in "Bottom line" or "What is settled"

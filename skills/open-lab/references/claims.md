@@ -116,6 +116,26 @@ investigator's run: "different lab". A second machine, a second person and a
 second model reaching the same result is the strongest form on offer here,
 and it is worth being able to grep for.
 
+## Who a change is credited to
+
+`--actor` says who is making a change. Once the lab's investigators have
+joined, it defaults to the caller's own tag, so nobody retypes their name
+into every command; in a lab nobody has joined there is no tag to assume and
+`--actor` is required. Credit is never guessed from the run: a claim's
+discoverer is the actor the dispatch stamped, and that is what stops a run
+confirming itself.
+
+## Stating a claim that only cites a source
+
+`claims.py new` states a claim as `proposed` and prints, with the ID, what
+would settle it. Two statuses may be given at birth instead, in one command
+and one commit: `--status externally-established --evidence "<citation>"`
+and `--status accepted-by-investigator --evidence "<the decision>"`. Neither
+rests on work of ours, so there is nothing for a later command to check.
+Every other status is refused there and reached with `set`: `verified` needs
+an ingested run that checked the claim, and a claim cannot be born already
+confirmed.
+
 ## Citing claims in prose
 
 Write the ID inline, in the sentence that uses it: `By C-021, the second method

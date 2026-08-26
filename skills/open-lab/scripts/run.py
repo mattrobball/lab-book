@@ -60,7 +60,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -95,11 +95,9 @@ and nothing else.
 
 ## Your fence
 
-You may create or modify files only under these paths:
+{fence}
 
-{allowed}
-
-Anything written outside them makes this run unusable, and the run is refused
+Anything written outside that makes this run unusable, and the run is refused
 at ingest rather than filed. Write nothing outside this repository either —
 no /tmp, no home directory; scratch files belong in your packet directory.
 
@@ -367,6 +365,26 @@ def guard_foreign_runs(root, staged):
     sys.exit(1)
 
 
+GITIGNORE_LINES = ("__pycache__/", "*.pyc")
+
+
+def ensure_gitignore(root):
+    """Byte-compiled Python is not a record. Every uncommitted file counts
+    against the worker whose run is being ingested, and a stray .pyc left
+    under a run directory implicates a worker that never wrote it. Written
+    once, appended to if the file exists without these lines."""
+    path = Path(root) / ".gitignore"
+    text = path.read_text() if path.exists() else ""
+    missing = [l for l in GITIGNORE_LINES if l not in text.splitlines()]
+    if not missing:
+        return False
+    head = "" if text else ("# Byte-compiled files are not part of the "
+                            "record.\n")
+    tail = "" if not text or text.endswith("\n") else "\n"
+    path.write_text(text + tail + head + "\n".join(missing) + "\n")
+    return True
+
+
 def cmd_guard_commit(args):
     """Run by the pre-commit hook. Refuses a commit that stages a file under
     an open run's directory, or under a run belonging to somebody else,
@@ -599,6 +617,14 @@ def regenerate_index(problem):
 
 # ---------------------------------------------------------------- execution
 
+# The shapes workers print their token counts in: the word before the
+# number or after it, with or without a separator. A count that is only
+# reported one way is a count missing from every other worker's record.
+NUMBER = r"[\d,.]+\s*[KkMm]?"
+DEFAULT_USAGE = (r"tokens(?:\s+used)?\s*[:=]?\s*(%s)"
+                 r"|(%s)\s*(?:total\s+)?tokens" % (NUMBER, NUMBER))
+
+
 def extract_usage(log, pattern):
     """Best-effort resource accounting. lab.json roles may set usage_pattern,
     a regex with named groups (tokens, cost) run over the worker log; absent
@@ -610,7 +636,7 @@ def extract_usage(log, pattern):
         text = log.read_text(errors="replace")[-20000:]
     except OSError:
         return None
-    pat = pattern or r"([\d,.]+[KkMm]?)\s*(?:total\s+)?tokens"
+    pat = pattern or DEFAULT_USAGE
     try:
         hits = list(re.finditer(pat, text))
     except re.error:
@@ -623,7 +649,11 @@ def extract_usage(log, pattern):
     if groups:
         usage = {k: v for k, v in groups.items() if v}
     elif m.groups():
-        usage["tokens"] = m.group(1)
+        # The default pattern spells the count more than one way; whichever
+        # alternative matched is the number.
+        hit = next((g for g in m.groups() if g), None)
+        if hit:
+            usage["tokens"] = hit.strip()
     return usage or None
 
 
@@ -720,12 +750,22 @@ def run_window(problem, rid, d):
 
 def first_line_cwd(path):
     """The working directory a session file names in its first line, if it
-    names one."""
+    names one. Some commands put it at the top level and others nest it one
+    level down inside that record, so both are looked at; a rule that knew
+    only the flat shape found nothing at all for half the workers."""
     try:
         with open(path, errors="replace") as fh:
-            return json.loads(fh.readline()).get("cwd")
-    except (OSError, json.JSONDecodeError, AttributeError):
+            rec = json.loads(fh.readline())
+    except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(rec, dict):
+        return None
+    if isinstance(rec.get("cwd"), str):
+        return rec["cwd"]
+    for value in rec.values():
+        if isinstance(value, dict) and isinstance(value.get("cwd"), str):
+            return value["cwd"]
+    return None
 
 
 def discover_transcript(problem, root, rid, d):
@@ -929,6 +969,7 @@ def cmd_new(args):
     root = git_root(problem)
     tag = require_own_branch(root, "a dispatch")
     install_hook(root)
+    ensure_gitignore(root)
     brief = Path(args.brief)
     if not brief.is_file():
         refuse("there is no brief at %s. Write one from templates/BRIEF.md and "
@@ -1024,9 +1065,14 @@ def cmd_new(args):
 
     (rundir / "packet").mkdir(parents=True, exist_ok=True)
     (rundir / "BRIEF.md").write_text(text)
+    extra = [a for a in allowed if a != rundir_rel]
+    fence = ("You may create or modify files only in this directory (`%s`) — "
+             "your own run directory, which is where you are running%s"
+             % (rundir_rel,
+                " — and these paths:\n\n%s"
+                % "\n".join("- `%s`" % a for a in extra) if extra else "."))
     charter = CHARTER.format(rid=rid, timeout=args.timeout,
-                             packet="%s/packet/" % rundir_rel,
-                             allowed="\n".join("- `%s`" % a for a in allowed))
+                             packet="%s/packet/" % rundir_rel, fence=fence)
     (rundir / "AGENTS.md").write_text(
         "# Worker charter\n\nThese rules bind this run. Nothing outside this "
         "directory does.\n\n" + charter)
@@ -1051,7 +1097,7 @@ def cmd_new(args):
             "{prompt}", "%s/PROMPT.md" % rundir_rel) or None,
     }
     write_json(rundir / "dispatch.json", dispatch)
-    commit(root, [rundir_rel, rel(brief, root)],
+    commit(root, [rundir_rel, rel(brief, root), ".gitignore"],
            "%s dispatched to %s" % (rid, model))
     print("%s — model %s, timeout %ss, may write: %s"
           % (rid, model, args.timeout, ", ".join(allowed)))
@@ -1299,7 +1345,7 @@ def allocate_claim(problem, statement, actor):
     with contextlib.redirect_stdout(buf):
         claims.main(["new", "--statement", statement, "--actor", actor,
                      "--problem", str(problem)])
-    return buf.getvalue().strip().splitlines()[-1]
+    return claims.first_id(buf.getvalue())
 
 
 def similar(first, second):
@@ -1562,6 +1608,7 @@ def cmd_note(args):
     problem = find_problem(args.problem)
     root = git_root(problem)
     tag = require_own_branch(root, "a notebook entry")
+    actor = claims.resolve_actor(args.actor, tag)
     body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
     if not body.strip():
         refuse("a note needs a body: pass --body with the text or --body-file "
@@ -1571,7 +1618,7 @@ def cmd_note(args):
                        "%s | note | — | %s" % (time.strftime("%Y-%m-%d", time.gmtime()),
                                                args.headline),
                        "**Actor:** %s · **Kind:** Director note (no packet, no "
-                       "claims)\n\n%s" % (args.actor, body.strip()), tag)
+                       "claims)\n\n%s" % (actor, body.strip()), tag)
     commit(root, [rel(problem / "notebook", root)], "note: %s" % args.headline)
     print("Entry: %s" % rel(entry, root))
     push_own_branch(root, tag)
@@ -1662,11 +1709,25 @@ def duplicate_pairs(root, problem):
     return out
 
 
+def default_since(root):
+    """Where catchup starts when nobody says: the last meeting, because that
+    is the line the group drew under what it had read, and a week otherwise.
+    A session that opens by asking the Director to pick a date starts by
+    getting it wrong."""
+    sha, when = last_meeting(root)
+    if when:
+        return "the last meeting (%s)" % sha[:8], when
+    week = datetime.now(timezone.utc) - timedelta(days=7)
+    return "the last seven days", week.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def cmd_catchup(args):
     problem = find_problem(args.problem)
     root = git_root(problem)
     since = args.since
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", since):
+    if not since:
+        since, cutoff = default_since(root)
+    elif re.match(r"^\d{4}-\d{2}-\d{2}$", since):
         cutoff = since + "T00:00:00Z"
     else:
         cutoff = commit_time(root, since)
@@ -1833,6 +1894,22 @@ def catchup_lints(problem, root=None):
         if len(dupes) > 8:
             lines.append("  ... and %d more" % (len(dupes) - 8))
 
+    thin = []
+    for rid, d in runs:
+        ing = ingest_record(problem, rid)
+        if not ing or not transcript_setting(root, d.get("role")).get("glob"):
+            continue
+        t = ing.get("transcript")
+        if t is None or not t.get("stored"):
+            thin.append(rid)
+    if thin:
+        lines.append("%d ingested run(s) have no transcript stored, though "
+                     "their role says where to find one — `run.py transcript "
+                     "<run>` attaches it (raise transcripts.max_mb first if it "
+                     "was too big): %s"
+                     % (len(thin), ", ".join(thin[:8])
+                        + (", …" if len(thin) > 8 else "")))
+
     shaky = []
     for cid in order:
         c = known[cid]
@@ -1933,6 +2010,41 @@ def cmd_void(args):
     push_own_branch(root, tag)
 
 
+def cmd_transcript(args):
+    """Attach a worker's transcript to a run already on record. Discovery
+    runs at ingest, when the session file is freshest, but a rule that was
+    wrong then — or a store that was still writing — would otherwise mean
+    the reasoning behind a filed run is lost for good. The packet is never
+    touched: this adds what the worker's own command wrote beside it."""
+    problem = find_problem(args.problem)
+    root = git_root(problem)
+    rid = args.run
+    rec = ingest_record(problem, rid)
+    if rec is None:
+        refuse("%s has no ingest record, so there is nothing to attach a "
+               "transcript to yet. Ingest or file the run first; ingest looks "
+               "for the transcript itself." % rid)
+    tag = require_owner(problem, root, rid, "attaching a transcript")
+    stored = run_dir(problem, rid) / TRANSCRIPT_NAME
+    if stored.exists() and not args.replace:
+        refuse("%s already has a transcript on record (%s). A record is added "
+               "to, not overwritten; if the stored copy is the wrong session, "
+               "say `--replace` and the swap is in the history." % (rid, stored))
+    d = load_json(run_dir(problem, rid) / "dispatch.json") or {}
+    found = attach_transcript(problem, root, rid, d, args.path)
+    if found is None:
+        print("Nothing attached to %s: no session file was found for it. Name "
+              "one with `--path`, or check roles.%s.transcript in lab.json."
+              % (rid, d.get("role")))
+        return
+    rec["transcript"] = found
+    write_json(run_dir(problem, rid) / "ingest.json", rec)
+    commit(root, [rel(run_dir(problem, rid), root)],
+           "%s: transcript attached" % rid)
+    print("%s: transcript on record." % rid)
+    push_own_branch(root, tag)
+
+
 def cmd_lint(args):
     """Read-only packet contract check. Workers run it before finishing;
     anyone may run it any time. Prints what is wrong, changes nothing."""
@@ -1983,6 +2095,11 @@ def cmd_waive_review(args):
         refuse("%s has no ingest record, so there is no review to waive." % rid)
     tag = require_owner(problem, root, rid, "waiving a review")
     rec["review_waived"] = args.reason
+    # Never demanded here: waiving needs no signature the lab does not
+    # already have, and a flag that refuses on a lab nobody has joined would
+    # stop a one-person lab clearing its own flag.
+    if args.actor or tag:
+        rec["review_waived_by"] = args.actor or tag
     write_json(run_dir(problem, rid) / "ingest.json", rec)
     commit(root, [rel(run_dir(problem, rid), root)],
            "%s review waived: %s" % (rid, args.reason[:60]))
@@ -1997,7 +2114,7 @@ def cmd_join(args):
     writing the record to one shared branch spends the day on pushes that are
     rejected, merged and conflicted over generated files — and two people
     reaching for the same next ID renumber each other's evidence by hand."""
-    root = lab_root()
+    root = lab_root(args.problem)
     name = claims.git_user(root)
     tag = own_tag(root)
     branch = own_branch(tag)
@@ -2021,6 +2138,7 @@ def cmd_join(args):
                    "in the tree, then join again."
                    % (branch, (r.stdout + r.stderr).strip()))
     install_hook(root)
+    ensure_gitignore(root)
     # The registry is read again here: the branch just checked out carries
     # its own lab.json, and registering from the previous branch's copy
     # would drop whoever it does not know about.
@@ -2033,7 +2151,7 @@ def cmd_join(args):
     reg[tag] = {"name": name, "host": host(), "joined": now()}
     cfg["investigators"] = reg
     (root / "lab.json").write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
-    commit(root, ["lab.json"], "join: %s (%s)" % (tag, name))
+    commit(root, ["lab.json", ".gitignore"], "join: %s (%s)" % (tag, name))
     push_own_branch(root, tag)
     print("Joined as %s (%s), on branch %s. Your runs and claims are now "
           "numbered in your own namespace (R-%s-001, C-%s-001); everything "
@@ -2044,7 +2162,7 @@ def cmd_join(args):
 
 def cmd_whoami(args):
     """Who this clone thinks you are, and what has not left it."""
-    root = lab_root()
+    root = lab_root(args.problem)
     name = claims.git_user(root)
     tag = slug(name)
     reg = investigators(root)
@@ -2076,7 +2194,7 @@ def rebuild_views(root, problems=None):
 
 
 def cmd_rebuild(args):
-    root = lab_root()
+    root = lab_root(args.problem)
     problems = [find_problem(args.problem)] if args.problem else all_problems(root)
     if not problems:
         refuse("there is no problem to rebuild under %s. Run this inside the "
@@ -2484,7 +2602,7 @@ def reconcile_close(root, tag, args):
 
 
 def cmd_reconcile(args):
-    root = lab_root()
+    root = lab_root(args.problem)
     if not joined(root):
         refuse("no investigator has joined this lab, so there is nothing to "
                "reconcile. Run `run.py join` — one investigator, one branch — "
@@ -2579,18 +2697,34 @@ def main(argv=None):
                                             "will not happen")
     w.add_argument("run")
     w.add_argument("--reason", required=True)
+    w.add_argument("--actor", help="who is waiving it (default: your "
+                                   "investigator tag, once anyone has joined "
+                                   "the lab)")
     w.set_defaults(func=cmd_waive_review)
 
     t = sub.add_parser("note", help="file a Director-written notebook entry")
     t.add_argument("--headline", required=True)
     t.add_argument("--body")
     t.add_argument("--body-file")
-    t.add_argument("--actor", required=True)
+    t.add_argument("--actor", help="who the entry is credited to (default: "
+                                   "your investigator tag, once anyone has "
+                                   "joined the lab)")
     t.set_defaults(func=cmd_note)
 
     c = sub.add_parser("catchup", help="what changed since a commit or a date")
-    c.add_argument("since", help="a commit, or YYYY-MM-DD")
+    c.add_argument("since", nargs="?",
+                   help="a commit, or YYYY-MM-DD (default: the last meeting, "
+                        "else the last seven days)")
     c.set_defaults(func=cmd_catchup)
+
+    tr = sub.add_parser("transcript", help="attach a worker's session file to "
+                                          "a run already on record")
+    tr.add_argument("run")
+    tr.add_argument("--path", metavar="FILE",
+                    help="the session file, when the role's rule cannot find it")
+    tr.add_argument("--replace", action="store_true",
+                    help="replace a transcript already on record")
+    tr.set_defaults(func=cmd_transcript)
 
     j = sub.add_parser("join", help="register this investigator and check out "
                                     "their own branch")
@@ -2613,9 +2747,14 @@ def main(argv=None):
     rc.add_argument("--date", help="the meeting's date (default: today, UTC)")
     rc.set_defaults(func=cmd_reconcile)
 
-    for q in (n, i, t, c, v, l, w, b):
+    # Every subcommand takes --problem, including the lab-wide ones, where
+    # it says which clone to work in rather than which problem: a flag that
+    # is right on six commands and unknown on four is a flag nobody trusts.
+    for q in (n, i, t, c, v, l, w, b, tr, j, m, rc):
         q.add_argument("--problem", help="the problem directory (default: found "
-                                         "by walking up from here)")
+                                         "by walking up from here); for "
+                                         "lab-wide commands, any directory in "
+                                         "the lab")
     g = sub.add_parser("guard-commit", help="pre-commit hook: refuse a hand "
                                             "commit of an open run's files, or "
                                             "of another investigator's run")
