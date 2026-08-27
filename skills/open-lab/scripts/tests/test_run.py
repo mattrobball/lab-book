@@ -929,6 +929,16 @@ class TestHousekeeping(LabCase):
         self.assertIn("__pycache__/", text)
         self.assertIn("*.pyc", text)
         self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
+        # Cached sources stay on disk; the manifest and the query log travel.
+        src = self.problem / "sources"
+        src.mkdir()
+        (src / "paper.pdf").write_bytes(b"%PDF-1.4 fake")
+        (src / "MANIFEST.md").write_text("- paper.pdf — fetched 2026-08-27, sha256 abc\n")
+        (src / "QUERIES.md").write_text("- asked: the bound\n")
+        status = git(self.root, "status", "--porcelain", "-uall").stdout
+        self.assertNotIn("paper.pdf", status)
+        self.assertIn("sources/MANIFEST.md", status)
+        self.assertIn("sources/QUERIES.md", status)
 
     def test_an_existing_gitignore_is_added_to_not_replaced(self):
         (self.root / ".gitignore").write_text("secrets.env\n")

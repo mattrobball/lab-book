@@ -195,7 +195,13 @@ meeting is where the group agrees — never a merge somebody did alone.
 The problem's `sources/` directory is to literature what `tools/` is to code:
 where reusable retrieval work is promoted so it is done once. Cache what can
 lawfully be cached, record each file's SHA-256 in `sources/MANIFEST.md`, and
-index the lot in STATUS.md under "Sources held here". `sources/QUERIES.md` is
+index the lot in STATUS.md under "Sources held here". The cached files
+themselves are not committed: the scaffolded `.gitignore` keeps
+`sources/` on disk and lets only `MANIFEST.md` and `QUERIES.md` through —
+papers and data tables are large and often not ours to redistribute, and a
+manifest line with the source's location and hash lets any clone fetch the
+same bytes. A small source the group must share travels by an explicit `!`
+line in `.gitignore`, on the Investigator's word. `sources/QUERIES.md` is
 the append-only log of searches: what was asked, where, what came back, what
 was kept — literature runs append to it, briefs paste from it. A source that
 cannot be obtained gets a manifest line, not a claim: what it is, what was

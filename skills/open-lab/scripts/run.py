@@ -367,6 +367,11 @@ def guard_foreign_runs(root, staged):
 
 GITIGNORE_LINES = ("__pycache__/", "*.pyc")
 PYCACHE_MARK = "# Byte-compiled files are not part of the record."
+SOURCES_LINES = ("problems/*/sources/*", "!problems/*/sources/MANIFEST.md",
+                 "!problems/*/sources/QUERIES.md")
+SOURCES_MARK = ("# Cached sources stay on disk: papers and data tables are large "
+                "and often not ours to redistribute. MANIFEST.md (where each came "
+                "from, its hash) and QUERIES.md (what was searched) are the record.")
 LARGE_MARK = ("# outputs over commits.max_mb, kept on disk, pinned by hash "
               "in ingest.json")
 
@@ -391,7 +396,9 @@ def ensure_gitignore(root):
     """Byte-compiled Python is not a record. Every uncommitted file counts
     against the worker whose run is being ingested, and a stray .pyc left
     under a run directory implicates a worker that never wrote it."""
-    return add_to_gitignore(root, GITIGNORE_LINES, PYCACHE_MARK)
+    a = add_to_gitignore(root, GITIGNORE_LINES, PYCACHE_MARK)
+    b = add_to_gitignore(root, SOURCES_LINES, SOURCES_MARK)
+    return a or b
 
 
 def gitignore_pattern(path):
