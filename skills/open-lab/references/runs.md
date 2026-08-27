@@ -63,6 +63,7 @@ Every key the scripts read, in one example:
   "commits": {"max_mb": 50},
   "transcripts": {"max_mb": 20},
   "sources": {"refetch_days": 30},
+  "kit_version": "<the kit this lab's copies came from>",
   "investigators": {}
 }
 ```
@@ -77,8 +78,8 @@ groups read over the worker's log when the built-in token shapes do not fit.
 at once; `machine.rotate_after_ingests` is when a session is told it has run
 long. `commits.max_mb` is the largest file ingest will put in the history;
 `transcripts.max_mb` caps what is copied into the record;
-`sources.refetch_days` is when a baseline is called stale. `investigators`
-is written by `run.py join` — never by hand.
+`sources.refetch_days` is when a baseline is called stale. `kit_version` and `investigators`
+are written by `run.py join` and `run.py upgrade` — never by hand.
 
 The skill ships no models or commands. `run.py new` refuses a dispatch to a role on hold, printing the
 note, and dispatches normally once the date has passed, so nobody has to
@@ -142,11 +143,39 @@ at dispatch with `--duplicates <run>`: catchup names the pair until the
 original is closed, so two people doing one job is visible on the day, not
 at the meeting.
 
+## Upgrading a lab
+
+A lab holds its own copies of the scripts, the templates, the glossary and
+the charter, so a run ingested a year ago can be replayed against the code
+that ran it. What that costs is knowing when the installed kit has moved on:
+one lab ran a week of work on scripts two versions behind the ones its
+Director believed it had. `lab.json` records `kit_version` — written when
+the lab is set up and by `run.py join` — and catchup says one line when the
+installed kit is newer.
+
+`run.py upgrade` finds the installed skill (beside the scripts, or where
+your agent keeps its skills, or `--from <dir>`), prints a diffstat and the
+full diff of what would change, and stops there. Copying happens only under
+`run.py upgrade --agree`, which is the Investigator's recorded agreement to
+change the gate: it files that agreement as a note itself, copies, stamps
+the new `kit_version`, and commits `upgrade: kit <old> -> <new>` on your own
+branch. The charter is merged rather than replaced — everything a lab wrote
+about itself and its Investigator, after the kit's own last section, is kept
+verbatim, because those instructions bind every session. Then run one small
+canary dispatch and ingest it clean before resuming: the one fence patch
+that skipped that step shipped broken.
+
 ## Seeing the others
 
 `run.py catchup` fetches and then reads every other `lab/<tag>` branch
 straight out of git — their runs, verdicts, and claim events — without
-merging anything into your tree. It reports, per investigator, what they
+merging anything into your tree. It reports only what `main` does not have
+yet, so the morning after a meeting nobody's shared decisions read as a
+day's work by someone who did none. It also puts your own clone straight:
+when the meeting has moved your branch on the remote and your copy is an
+ancestor of it, a clean tree is fast-forwarded and told so in one line, a
+dirty one is given the command; local `main` is brought level with origin's
+while it is not the branch you are on. It reports, per investigator, what they
 have recorded since the last meeting, their runs still open past a day, and
 how many of your own commits origin has not got. Every write pushes your
 branch afterwards, best effort: a failure is one line, never a lost commit,
@@ -163,8 +192,11 @@ prevent, and reading each other daily is what keeps that meeting short.
 `run.py reconcile`, with everyone on a call and one person at the keyboard.
 It is in two halves.
 
-**Prepare.** It refuses on a dirty tree or unpushed work, fetches, checks out
-`main`, and merges every investigator's branch in turn. Namespaced files
+**Prepare.** It refuses on a dirty tree — a meeting starts from a record
+everyone has read — then pushes the keyboard-holder's own branch itself,
+because they are its only writer and a meeting that sends someone away to
+push starts late. Then it fetches, checks out `main`, and merges every
+investigator's branch in turn. Namespaced files
 never collide. What can conflict is generated pages, which it rebuilds from
 the record; the ledgers, whose union is the answer because they are
 append-only; the registry of investigators, which is a list of people; and
@@ -174,17 +206,28 @@ last are not merged: the incoming version is left beside the page as
 goes on the agenda. Nothing is ever left half-merged for somebody to find.
 
 Then it prints and files the agenda — `notebook/meetings/<date>-agenda.md` —
-one numbered line per thing two records disagree about or one record has left
-open, each with the command that settles it: pages rewritten twice, the same
-statement proposed in two streams, one claim two streams left in different
-states, a verified claim resting on something another stream demoted, runs
-open since before the last meeting, duplicate pairs, reviews owed. The
-Director leads the room through it and never settles a disagreement itself.
+one numbered item per thing two records disagree about or one record has left
+open, each with the commands that settle it, spelled out with the real date,
+the tags merged this time and the problem's slug, so a line can be run as it
+stands. The order is what the room can settle fastest: one claim two streams
+left in different states (with the folded status, whose event is the latest,
+and each side's reason), the same statement proposed in two streams (both
+statements quoted, and a command for each direction — the room picks which
+survives, and neither direction is the default), a verified claim resting on
+something another stream moved, runs open since before the last meeting and
+duplicate pairs, reviews owed, and the hand-written pages last, because a
+page is rewritten out of what has just been decided. The Director leads the
+room through it and never settles a disagreement itself.
 
 **Record.** Decisions are ordinary commands, made on `main` while the agenda
 is open, with `--actor "meeting <date> (<tags>)"` so the ledger says who
-decided. Then `run.py reconcile --close --present alice,bob` refuses while
-any copy of a page is still in the tree, files the minutes as
+decided — `claims.py set` when the status moves, `claims.py affirm` when the
+room looks at a claim and keeps it, an edit to a page, a `run.py note`. Then
+`run.py reconcile --close --present alice,bob` refuses while any copy of a
+page is still in the tree, and takes the minutes from what the meeting
+actually committed: every claim event under its actor, every note it filed,
+every page it rewrote, each filed under the agenda item whose claim or path
+it matches and the rest under "Also decided". It writes them to
 `notebook/meetings/<date>.md`, commits `meeting: <date> (<tags>)`, pushes
 `main`, fast-forwards every branch onto it, and puts the keyboard-holder back
 on their own. Everyone starts the next day from the same record, and the

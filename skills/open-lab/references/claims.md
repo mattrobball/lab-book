@@ -136,6 +136,27 @@ Every other status is refused there and reached with `set`: `verified` needs
 an ingested run that checked the claim, and a claim cannot be born already
 confirmed.
 
+## Saying why, and what a claim rests on
+
+`claims.py set` takes `--reason` — free text, kept on the event and shown in
+the claim's History. It is required when a settled claim steps back: from
+`verified`, `conditional` or `externally-established` to `proposed` or
+`conditional`. Moving up carries its own explanation, the evidence; a
+demotion with nothing behind it is re-argued from scratch at the next
+meeting. `--conditions` is required whenever the target is `conditional`,
+and replaces what is on record: "conditional" with no condition written down
+is a claim nobody can ever discharge.
+
+## Deciding to change nothing
+
+`claims.py affirm C-NNN --reason "..."` records a decision that leaves the
+status where it is. A room that looks at a claim, hears the objection and
+keeps it has decided something; without somewhere to put that, the ledger
+shows nothing happened and the same claim is argued again at the next
+meeting. An affirmation appears in the claim's History and counts as a
+decision in a meeting's minutes. `set` to the status a claim already holds
+is still refused, and says to use this instead.
+
 ## Citing claims in prose
 
 Write the ID inline, in the sentence that uses it: `By C-021, the second method

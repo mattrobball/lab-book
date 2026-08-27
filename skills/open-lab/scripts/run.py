@@ -58,6 +58,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -69,7 +70,7 @@ from claims import (refuse, now, today, host, git, git_out, git_root,   # noqa: 
                     lab_root, lab_config, investigators, joined, slug,
                     own_tag, own_branch, current_branch, has_ref, has_remote,
                     require_own_branch, branch_refs, read_branch_file,
-                    read_branch_json, list_branch_dir, id_tag, id_key,
+                    read_branch_json, id_tag, id_key,
                     make_id, meetings_dir, agenda_path,
                     branch_tags, known_tags, RUN_ID)
 
@@ -1704,12 +1705,17 @@ def cmd_note(args):
 
 def describe_event(rec):
     """One ledger event in a line, whichever stream it came from."""
+    why = ' — "%s"' % rec["reason"] if rec.get("reason") else ""
     if rec["event"] == "new":
-        return "%s stated as %s by %s" % (rec["id"], rec["status"], rec["actor"])
-    return "%s %s -> %s by %s%s" % (rec["id"], rec["from"], rec["to"],
-                                    rec["actor"],
-                                    " (%s)" % rec["evidence"]
-                                    if rec.get("evidence") else "")
+        return "%s stated as %s by %s%s" % (rec["id"], rec["status"],
+                                            rec["actor"], why)
+    if rec["event"] == "affirm":
+        return "%s affirmed as %s by %s%s" % (rec["id"], rec["status"],
+                                              rec["actor"], why)
+    return "%s %s -> %s by %s%s%s" % (rec["id"], rec["from"], rec["to"],
+                                      rec["actor"],
+                                      " (%s)" % rec["evidence"]
+                                      if rec.get("evidence") else "", why)
 
 
 def hours_since(stamp):
@@ -1722,45 +1728,128 @@ def hours_since(stamp):
     return (datetime.now(timezone.utc) - then).total_seconds() / 3600.0
 
 
-def others_report(root, problem, since):
-    """What the other investigators have recorded, read straight from their
-    branches. Without it "whose run is this, and is it alive" is a question
-    the record cannot answer, and two labs quietly hold two truths about one
-    claim until the paper is written."""
+def main_ref(root):
+    """The group's agreed line as this clone can see it: origin's main where
+    there is one, the local main otherwise, None before there is either."""
+    for ref in ("origin/main", "main"):
+        if has_ref(root, ref):
+            return ref
+    return None
+
+
+def branch_news(root, problem, ref):
+    """What is on one investigator's branch that main does not have.
+    Scoped to `main..<their branch>`, so the meeting's own commits — which
+    everyone shares — never come back afterwards as somebody else's new
+    work, which is how a first morning after a meeting read as a day's work
+    by people who had done none."""
+    base, agreed = problem_rel(root, problem), main_ref(root)
+    scope = "%s..%s" % (agreed, ref) if agreed else ref
+    touched = set()
+    for sha in git_out(root, "log", scope, "--format=%H").splitlines():
+        touched.update(git_out(root, "show", "--name-only", "--format=",
+                               sha).splitlines())
+    runs, ledgers, lines = set(), set(), []
+    for path in touched:
+        run_hit = re.match(re.escape(base) + r"runs/([^/]+)/", path)
+        if run_hit:
+            runs.add(run_hit.group(1))
+        led = re.match(re.escape(base) + r"claims/(ledger[^/]*\.jsonl)$", path)
+        if led:
+            ledgers.add(led.group(1))
+    for rid in sorted(runs, key=id_key):
+        d = read_branch_json(root, ref, base + "runs/%s/dispatch.json" % rid)
+        if not d:
+            continue
+        ing = read_branch_json(root, ref, base + "runs/%s/ingest.json" % rid)
+        if ing:
+            lines.append("%s %s — %s" % (rid, ing["verdict"], ing["headline"]))
+        elif d.get("status") == "open":
+            age = hours_since(d.get("ts"))
+            lines.append("%s open%s (%s)"
+                         % (rid, " %dh" % age if age is not None else "",
+                            d.get("model")))
+        else:
+            lines.append("%s %s" % (rid, d.get("status")))
+    for name in sorted(ledgers):
+        theirs = (read_branch_file(root, ref, base + "claims/" + name)
+                  or "").splitlines()
+        ours = set((read_branch_file(root, agreed, base + "claims/" + name)
+                    or "").splitlines()) if agreed else set()
+        for line in theirs:
+            if line.strip() and line not in ours:
+                lines.append(describe_event(json.loads(line)))
+    return lines
+
+
+def catch_up_own_branch(root, tag):
+    """After a meeting, everyone's branch has been fast-forwarded to main on
+    the remote while their own clone still points at the old commit. Left
+    alone, the next morning starts with a push that is rejected and a merge
+    nobody meant to make."""
+    if not tag or not has_remote(root):
+        return
+    remote, mine = "origin/" + own_branch(tag), own_branch(tag)
+    if not has_ref(root, remote) or not has_ref(root, mine):
+        return
+    ahead = git_out(root, "rev-list", "--count", "%s..%s" % (mine, remote))
+    if not ahead.isdigit() or not int(ahead):
+        return
+    if git(root, "merge-base", "--is-ancestor", mine, remote).returncode != 0:
+        return                     # real divergence: not a meeting's doing
+    if current_branch(root) != mine:
+        print("\nYour branch on origin is %s commit(s) ahead of this clone — "
+              "the meeting moved it. `git checkout %s && git pull --ff-only`."
+              % (ahead, mine))
+        return
+    if {p for p in dirty(root)
+            if "__pycache__" not in p and not p.endswith(".pyc")}:
+        print("\nYour branch on origin is %s commit(s) ahead of this clone "
+              "(the meeting moved it), and this tree has uncommitted work. "
+              "Commit it, then `git pull --ff-only`." % ahead)
+        return
+    if git(root, "merge", "--ff-only", remote).returncode == 0:
+        print("\nYour branch was %s commit(s) behind origin — the meeting "
+              "moved it — and has been fast-forwarded. Nothing of yours "
+              "changed." % ahead)
+    else:
+        print("\nYour branch is %s commit(s) behind origin; run `git pull "
+              "--ff-only`." % ahead)
+
+
+def refresh_main(root):
+    """Keep local main level with origin's while it is not checked out. A
+    stale main is what the next meeting would merge everybody into."""
+    if not has_remote(root) or current_branch(root) == "main":
+        return
+    if not has_ref(root, "origin/main"):
+        return
+    r = git(root, "fetch", "origin", "main:main")
+    if r.returncode != 0:
+        print("\nLocal main is not level with origin's (%s); the next meeting "
+              "merges into main, so put that right before it."
+              % (r.stderr.strip().splitlines() or ["no reason given"])[-1][:90])
+
+
+def others_report(root, problem):
+    """What the other investigators have recorded that the group has not yet
+    agreed. Read straight from their branches: without it, "whose run is
+    this, and is it alive" is a question the record cannot answer, and two
+    labs quietly hold two truths about one claim until the paper is
+    written."""
     mine = own_tag(root) if joined(root) else None
     fetch(root)
-    base = problem_rel(root, problem)
-    hours = ((lab_config(root).get("machine") or {}).get("open_run_hours") or 24)
-    print("\nOther investigators (read from their branches, not merged):")
+    catch_up_own_branch(root, mine)
+    refresh_main(root)
+    print("\nOther investigators (read from their branches, not merged; only "
+          "what main does not have yet):")
     seen = False
     for tag, ref in branch_refs(root, skip=mine):
         seen = True
-        lines = []
-        for rid in sorted(list_branch_dir(root, ref, base + "runs"), key=id_key):
-            d = read_branch_json(root, ref, base + "runs/%s/dispatch.json" % rid)
-            if not d:
-                continue
-            ing = read_branch_json(root, ref, base + "runs/%s/ingest.json" % rid)
-            if ing and ing["ts"] >= since:
-                lines.append("%s %s — %s" % (rid, ing["verdict"], ing["headline"]))
-            elif d.get("status") == "open":
-                age = hours_since(d.get("ts"))
-                if age is not None and age > hours:
-                    lines.append("%s open %dh (%s)" % (rid, age, d.get("model")))
-            elif d["ts"] >= since:
-                lines.append("%s dispatched to %s" % (rid, d.get("model")))
-        for name in list_branch_dir(root, ref, base + "claims"):
-            if not (name.startswith("ledger") and name.endswith(".jsonl")):
-                continue
-            for line in (read_branch_file(root, ref,
-                                          base + "claims/" + name) or "").splitlines():
-                if line.strip():
-                    rec = json.loads(line)
-                    if rec["ts"] >= since:
-                        lines.append(describe_event(rec))
-        print("  %s (%s):" % (tag, ref))
+        lines = branch_news(root, problem, ref)
+        print("  %s (%s):" % (who(root, tag), ref))
         print("\n".join("    " + l for l in lines) if lines
-              else "    nothing since %s" % since)
+              else "    nothing since the last meeting")
     if not seen:
         print("  nobody else has pushed a branch this clone can see")
     n = unpushed(root, mine)
@@ -1841,7 +1930,7 @@ def cmd_catchup(args):
     print("\nStill open:")
     print("\n".join("  " + o for o in open_runs) if open_runs else "  nothing")
     if joined(root):
-        others_report(root, problem, last_meeting(root)[1] or cutoff)
+        others_report(root, problem)
     overdue_report(problem)
     if install_hook(root) is None:
         print("\nThe pre-commit guard is not installed in this clone (another "
@@ -1851,6 +1940,7 @@ def cmd_catchup(args):
     status_report(problem)
     baseline_report(problem, root)
     catchup_lints(problem, root)
+    kit_notice(root)
 
 
 BASELINE_LINE = re.compile(r"baseline.*?fetched\s+(\d{4}-\d{2}-\d{2})", re.I)
@@ -1918,10 +2008,13 @@ def status_report(problem):
                     and not re.search(re.escape(cid) + r"\s*\(proposed", line)):
                 flagged.append((cid, section, line.strip()))
     if flagged:
-        print("STATUS.md states as settled what is only proposed — label it "
-              "\"C-NNN (proposed, unreviewed)\" by hand, or take it out:")
+        print("STATUS.md has lines that cite a claim which is proposed "
+              "without the label — the check is for the words \"(proposed\" "
+              "beside the ID. Label each \"C-NNN (proposed, unreviewed)\" by "
+              "hand, or take the sentence out:")
         for cid, section, line in flagged:
-            print("- %s in \"%s\": %s" % (cid, section, line[:110]))
+            print("- cites %s, which is proposed, without the label — in "
+                  "\"%s\": %s" % (cid, section, line[:110]))
 
 
 def catchup_lints(problem, root=None):
@@ -2184,6 +2277,201 @@ def cmd_waive_review(args):
     push_own_branch(root, tag)
 
 
+# ------------------------------------------------------- the kit's version
+
+# What a lab holds a copy of, and where the kit keeps the original.
+KIT_FILES = (("run.py", "scripts/run.py"), ("claims.py", "scripts/claims.py"),
+             ("templates", "assets/templates"),
+             ("GLOSSARY.md", "assets/GLOSSARY.md"),
+             ("AGENTS.md", "assets/AGENTS.md"))
+SKILL_SEARCH = ("~/.claude/skills/open-lab", "~/.codex/skills/open-lab",
+                "~/.agents/skills/open-lab")
+VERSION_LINE = re.compile(r'^\s*version:\s*"?([0-9][^"\s]*)"?\s*$', re.M)
+
+
+def kit_version(skill_dir):
+    """The version in a skill's SKILL.md front matter; None when there is no
+    SKILL.md to read, which is how a directory is told from a skill."""
+    p = Path(skill_dir) / "SKILL.md"
+    if not p.is_file():
+        return None
+    m = VERSION_LINE.search(p.read_text())
+    return m.group(1) if m else None
+
+
+def installed_kit(explicit=None):
+    """Where the installed kit is. A lab holds copies of the scripts on
+    purpose, so a run ingested a year ago can be replayed against the code
+    that ran it — but then nothing tells the lab that the kit has moved on,
+    and one lab ran two versions behind for a week without knowing."""
+    here = Path(__file__).resolve().parent.parent
+    candidates = ([Path(explicit).expanduser()] if explicit else []) + [here]
+    candidates += [Path(p).expanduser() for p in SKILL_SEARCH]
+    for cand in candidates:
+        if kit_version(cand):
+            return cand
+    return None
+
+
+def newer(a, b):
+    """True when version a is later than b, compared number by number."""
+    def parts(v):
+        return tuple(int(x) if x.isdigit() else x
+                     for x in re.split(r"[.\-+]", str(v or "")))
+    try:
+        return parts(a) > parts(b)
+    except TypeError:
+        return str(a or "") > str(b or "")
+
+
+def merged_charter(lab_text, kit_text):
+    """The kit's charter with this lab's own sections kept. Everything from
+    the first section the kit does not have is carried over verbatim: what a
+    lab records about itself and its Investigator binds every session, and
+    an upgrade that dropped it would take those instructions with it."""
+    kit_heads = {h.strip().lower() for h in claims.HEADING.findall(kit_text)}
+    parts = claims.HEADING.split(lab_text)
+    tail, keeping = [], False
+    for i in range(1, len(parts) - 1, 2):
+        head, body = parts[i].strip(), parts[i + 1]
+        if not keeping and head.lower() in kit_heads:
+            continue
+        keeping = True
+        tail.append("## %s\n%s" % (head, body.rstrip()))
+    if not tail:
+        return kit_text
+    return kit_text.rstrip() + "\n\n" + "\n\n".join(tail) + "\n"
+
+
+def kit_pairs(root, kit, workdir):
+    """(label, what the lab has, what it would have) for every copied file.
+    The charter is compared against the merged version, not the kit's, so
+    the diff shows what would really change."""
+    pairs = []
+    for name, source in KIT_FILES:
+        mine, theirs = Path(root) / name, Path(kit) / source
+        if name == "AGENTS.md" and mine.is_file() and theirs.is_file():
+            staged = Path(workdir) / "AGENTS.md"
+            staged.write_text(merged_charter(mine.read_text(),
+                                             theirs.read_text()))
+            theirs = staged
+        pairs.append((name, mine, theirs))
+    return pairs
+
+
+def show_kit_diff(root, pairs, stat):
+    """git's own diff between two trees that are not in git. Returns whether
+    anything differs."""
+    changed = False
+    for name, mine, theirs in pairs:
+        if not theirs.exists():
+            continue
+        args = ["diff", "--no-index"] + (["--stat"] if stat else [])
+        r = git(root, *(args + ["--", str(mine), str(theirs)]))
+        if r.stdout.strip():
+            changed = True
+            print(r.stdout.rstrip())
+    return changed
+
+
+def cmd_upgrade(args):
+    """Bring a lab's copies of the scripts up to the installed kit. The
+    copies are deliberate; the gap they open is that nobody is told when the
+    kit has moved on, and a lab can run for a week on scripts two versions
+    behind the ones its Director thinks it has."""
+    root = lab_root(args.problem)
+    tag = require_own_branch(root, "an upgrade of the lab's scripts")
+    kit = installed_kit(args.from_dir)
+    if kit is None:
+        refuse("I cannot find an installed open-lab kit to upgrade from. Pass "
+               "--from with the skill's directory (the one holding SKILL.md), "
+               "or install the skill where your agent keeps them: %s."
+               % ", ".join(SKILL_SEARCH))
+    new_version = kit_version(kit)
+    old_version = lab_config(root).get("kit_version")
+    print("This lab: kit %s. Installed at %s: kit %s."
+          % (old_version or "unstamped", kit, new_version))
+    if old_version == new_version:
+        print("Same version; nothing to bring over. Pass --from if you meant "
+              "a different kit.")
+        return
+    if old_version and newer(old_version, new_version):
+        print("This lab is on a later version than the installed kit. Going "
+              "back is a downgrade, and the diff below reads in reverse.")
+    with tempfile.TemporaryDirectory() as workdir:
+        pairs = kit_pairs(root, kit, workdir)
+        print("\nWhat would change:")
+        if not show_kit_diff(root, pairs, stat=True):
+            print("  nothing — the files are identical.")
+        else:
+            print("")
+            show_kit_diff(root, pairs, stat=False)
+        if not args.agree:
+            refuse("nothing has been changed. The scripts are the gate, and "
+                   "the gate is not modified by the party it judges: read the "
+                   "diff above with the Investigator, and run `run.py upgrade "
+                   "--agree` on their word. That records their agreement as a "
+                   "note and does the copy in one commit.")
+        for name, mine, theirs in pairs:
+            if not theirs.exists():
+                continue
+            if theirs.is_dir():
+                shutil.copytree(str(theirs), str(mine), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(theirs), str(mine))
+    cfg = lab_config(root)
+    cfg["kit_version"] = new_version
+    (root / "lab.json").write_text(json.dumps(cfg, indent=2, sort_keys=True)
+                                   + "\n")
+    paths = [name for name, _ in KIT_FILES] + ["lab.json"]
+    problem = upgrade_note_problem(root)
+    if problem is not None:
+        entry = file_entry(problem, "Lab scripts upgraded: kit %s -> %s"
+                           % (old_version or "unstamped", new_version),
+                           "%s | upgrade | — | kit %s -> %s"
+                           % (today(), old_version or "unstamped", new_version),
+                           "**Actor:** %s · **Kind:** Director note (no packet, "
+                           "no claims)\n\nThe Investigator agreed to this "
+                           "change of the scripts (`run.py upgrade --agree`). "
+                           "Copied from %s: %s.\n\nThe gate is not modified "
+                           "by the party it judges, so this is on record "
+                           "before the first run under the new scripts."
+                           % (claims.resolve_actor(None, tag) if tag else
+                              "director", kit,
+                              ", ".join(n for n, _ in KIT_FILES)), tag)
+        paths.append(rel(problem / "notebook", root))
+        print("Note filed: %s" % rel(entry, root))
+    commit(root, paths, "upgrade: kit %s -> %s"
+           % (old_version or "unstamped", new_version))
+    push_own_branch(root, tag)
+    print("Upgraded to kit %s. Run one small canary dispatch and ingest it "
+          "clean before resuming normal work — the one fence patch that "
+          "skipped this shipped broken." % new_version)
+
+
+def upgrade_note_problem(root):
+    """Which problem's notebook an upgrade note belongs in: the one you are
+    standing in, else the first, else none at all in a lab with no problems
+    yet."""
+    problems = all_problems(root)
+    here = Path.cwd().resolve()
+    for p in problems:
+        if p == here or p in here.parents:
+            return p
+    return problems[0] if problems else None
+
+
+def kit_notice(root):
+    """One line when the installed kit has moved past this lab's copies."""
+    kit = installed_kit()
+    have, there = lab_config(root).get("kit_version"), kit_version(kit or "")
+    if have and there and newer(there, have):
+        print("\nThe installed kit is %s; this lab's scripts are %s. "
+              "`run.py upgrade` shows what would change and asks for the "
+              "Investigator's agreement before touching anything."
+              % (there, have))
+
+
 # ------------------------------------------------- join, whoami, rebuild
 
 def cmd_join(args):
@@ -2227,6 +2515,9 @@ def cmd_join(args):
         return
     reg[tag] = {"name": name, "host": host(), "joined": now()}
     cfg["investigators"] = reg
+    # Which kit this lab's copies came from, so `run.py upgrade` and catchup
+    # can tell when the installed one has moved on.
+    cfg.setdefault("kit_version", kit_version(installed_kit() or ""))
     (root / "lab.json").write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
     commit(root, ["lab.json", ".gitignore"], "join: %s (%s)" % (tag, name))
     push_own_branch(root, tag)
@@ -2437,50 +2728,97 @@ def stream_map(problem):
     return out
 
 
-def agenda_items(root, base, base_time, pages):
+def who(root, tag):
+    """A person by name, with their tag beside it. An agenda is read aloud
+    in a room: "bobbrown" is a branch, and the person answering to it is
+    somebody the others call by name."""
+    if not tag:
+        return "the founding stream"
+    name = (investigators(root).get(tag) or {}).get("name")
+    return "%s (%s)" % (name, tag) if name else tag
+
+
+def meeting_actor(date, tags):
+    """The actor every decision of this meeting is recorded under, spelled
+    out with the real date and the people who were merged into it — never a
+    placeholder somebody has to remember to replace."""
+    return "meeting %s (%s)" % (date, ",".join(tags))
+
+
+def clock(stamp):
+    return str(stamp)[11:16] or str(stamp)
+
+
+def latest_reason(event):
+    text = (event or {}).get("reason")
+    return ' — "%s"' % text if text else ""
+
+
+def agenda_items(root, base, base_time, pages, date, tags):
     """The meeting's agenda: everything two records disagree about, or one
-    record has left open, each with the command that settles it."""
-    items = []
-    for p, tags in sorted(pages.items()):
-        items.append(("%s was rewritten on more than one branch (%s)"
-                      % (p, ", ".join(tags)),
-                      "read %s beside %s, write the page the room agrees, "
-                      "then delete the copies"
-                      % (p, ", ".join("%s.%s" % (p, t) for t in tags))))
-    for p, tags in sorted(pages_edited_on_branches(root, base,
-                                                   skip=set(pages)).items()):
-        items.append(("%s was edited on more than one branch since the last "
-                      "meeting (%s), and merged without conflict"
-                      % (p, ", ".join(tags)),
-                      "read %s and confirm it says what the room believes" % p))
+    record has left open, each with the commands that settle it. Ordered by
+    what the room can decide fastest with the record in front of it —
+    claims first, work in hand next, the hand-written pages last, because a
+    page is rewritten out of what the room has just decided."""
+    items, actor = [], meeting_actor(date, tags)
 
     for problem in all_problems(root):
-        where = problem.name
+        slug = problem.name
         known, order = claims.load(problem)
+
+        # 1. One claim, two streams, two answers.
+        for cid, by_stream in sorted(stream_map(problem).items(),
+                                     key=lambda x: id_key(x[0])):
+            latest = {}
+            for tag, events in by_stream.items():
+                # Sorted, not max(): two events a stream wrote inside one
+                # second are ordered by the ledger they are written in, and
+                # picking the earlier of them read a decision as if it had
+                # never been taken.
+                last = sorted(events, key=lambda r: r["ts"])[-1]
+                if last["event"] in ("set", "affirm"):
+                    latest[tag] = last
+            states = {t: (e.get("to") or e.get("status"))
+                      for t, e in latest.items()}
+            if len(set(states.values())) < 2:
+                continue
+            # The same tie-break the fold uses, so "the latest" and the
+            # status the views show can never disagree with each other.
+            newest = sorted(latest,
+                            key=lambda t: (latest[t]["ts"], t or "\uffff"))[-1]
+            said = "; ".join("%s has it %s%s"
+                             % (who(root, t), states[t], latest_reason(latest[t]))
+                             for t in sorted(latest))
+            items.append((
+                "%s is currently %s — %s's event of %s is the latest.\n%s"
+                % (cid, known[cid]["status"], who(root, newest),
+                   clock(latest[newest]["ts"]), said),
+                ["the room decides, then one of:",
+                 'claims.py set %s <status> --reason "..." --actor "%s" '
+                 '--problem %s' % (cid, actor, slug),
+                 'claims.py affirm %s --reason "..." --actor "%s" --problem %s'
+                 % (cid, actor, slug)]))
+
+        # 2. The same statement proposed in two streams.
         for i, a in enumerate(order):
             for b in order[i + 1:]:
                 if id_tag(a) == id_tag(b):
                     continue
-                if similar(known[a]["statement"], known[b]["statement"]):
-                    items.append(("%s (%s) and %s (%s) state the same thing in "
-                                  "two streams" % (a, id_tag(a) or "founding",
-                                                   b, id_tag(b) or "founding"),
-                                  "claims.py set %s superseded --by %s "
-                                  "--actor \"meeting <date> (<tags>)\" "
-                                  "--problem %s" % (a, b, where)))
-        for cid, by_stream in sorted(stream_map(problem).items(), key=lambda x: id_key(x[0])):
-            latest = {}
-            for tag, evs in by_stream.items():
-                last = max(evs, key=lambda r: r["ts"])
-                if last["event"] != "new":
-                    latest[tag] = last["to"]
-            if len(set(latest.values())) > 1:
-                items.append(("%s is %s" % (cid, " and ".join(
-                    "%s in %s" % (st, t or "the founding stream")
-                    for t, st in sorted(latest.items()))),
-                    "the room decides, then `claims.py set %s <status> "
-                    "--actor \"meeting <date> (<tags>)\" --problem %s`"
-                    % (cid, where)))
+                if not similar(known[a]["statement"], known[b]["statement"]):
+                    continue
+                items.append((
+                    "%s and %s state the same thing in two streams. The room "
+                    "picks which one survives; the other is superseded by it, "
+                    "and neither direction is the default.\n%s (%s): \"%s\"\n"
+                    "%s (%s): \"%s\""
+                    % (a, b, a, who(root, id_tag(a)), known[a]["statement"],
+                       b, who(root, id_tag(b)), known[b]["statement"]),
+                    ['if %s survives: claims.py set %s superseded --by %s '
+                     '--actor "%s" --problem %s' % (b, a, b, actor, slug),
+                     'if %s survives: claims.py set %s superseded --by %s '
+                     '--actor "%s" --problem %s' % (a, b, a, actor, slug)]))
+
+        # 3. Something verified standing on something another stream moved.
         for cid in order:
             c = known[cid]
             if c["status"] != "verified":
@@ -2488,14 +2826,18 @@ def agenda_items(root, base, base_time, pages):
             for r in c.get("rests_on") or []:
                 rc = known.get(r)
                 if rc and rc["status"] != "verified" and id_tag(r) != id_tag(cid):
-                    items.append(("%s is verified and rests on %s, which "
-                                  "another stream has left %s"
-                                  % (cid, r, rc["status"]),
-                                  "`claims.py set %s conditional` or verify %s "
-                                  "again — the room decides which" % (cid, r)))
+                    items.append((
+                        "%s is verified and rests on %s, which %s has left %s"
+                        % (cid, r, who(root, id_tag(r)), rc["status"]),
+                        ['claims.py set %s conditional --conditions "given %s" '
+                         '--reason "..." --actor "%s" --problem %s'
+                         % (cid, r, actor, slug),
+                         "or verify %s again — the room decides which" % r]))
+
+        # 4. Work in hand: runs left open, and work done twice.
         stale, owed = {}, {}
         for rid, d in all_runs(problem):
-            owner = run_owner(problem, rid) or "founding stream"
+            owner = run_owner(problem, rid)
             if d["status"] == "open" and (not base_time or d["ts"] < base_time):
                 stale.setdefault(owner, []).append(rid)
             ing = ingest_record(problem, rid) or {}
@@ -2503,17 +2845,47 @@ def agenda_items(root, base, base_time, pages):
                     and not ing.get("review_waived")):
                 owed.setdefault(owner, []).append(rid)
         for owner, rids in sorted(stale.items()):
-            items.append(("%s has %d run(s) open since before the last meeting: "
-                          "%s" % (owner, len(rids), ", ".join(rids)),
-                          "%s ingests or voids each one" % owner))
+            items.append(("%s has %d run(s) open since before the last "
+                          "meeting: %s" % (who(root, owner), len(rids),
+                                           ", ".join(rids)),
+                          ["%s ingests or voids each one" % who(root, owner)]))
+        for line in duplicate_pairs(root, problem):
+            items.append((line, ["close the original, or void the duplicate"]))
+
+        # 5. Reviews nobody has done.
         for owner, rids in sorted(owed.items()):
             items.append(("%s owes a review on %d run(s): %s"
-                          % (owner, len(rids), ", ".join(rids)),
-                          "dispatch a referee, or `run.py waive-review <run> "
-                          "--reason ...`"))
-        for line in duplicate_pairs(root, problem):
-            items.append((line, "close the original, or void the duplicate"))
+                          % (who(root, owner), len(rids), ", ".join(rids)),
+                          ["dispatch a referee whose packet lists the run in "
+                           "`reviewed`",
+                           "or run.py waive-review <run> --reason \"...\""]))
+
+    # 6. The pages, last: they are rewritten out of what was just decided.
+    for p, page_tags in sorted(pages.items()):
+        items.append(("%s was rewritten on more than one branch (%s)"
+                      % (p, ", ".join(who(root, t) for t in page_tags)),
+                      ["read %s beside %s" % (p, ", ".join(
+                          "%s.%s" % (p, t) for t in page_tags)),
+                       "write the page the room agrees, then delete the copies"]))
+    for p, page_tags in sorted(pages_edited_on_branches(root, base,
+                                                        skip=set(pages)).items()):
+        items.append(("%s was edited on more than one branch since the last "
+                      "meeting (%s), and merged without conflict"
+                      % (p, ", ".join(who(root, t) for t in page_tags)),
+                      ["read %s and confirm it says what the room believes" % p]))
     return items
+
+
+def render_agenda(items):
+    """The agenda as numbered lines, one place, so the file and the screen
+    say the same thing."""
+    out = []
+    for i, (what, commands) in enumerate(items, 1):
+        first, rest = what.split("\n")[0], what.split("\n")[1:]
+        out.append("%d. %s" % (i, first))
+        out += ["   %s" % l for l in rest]
+        out += ["   - %s" % c for c in commands]
+    return out
 
 
 def write_agenda(root, date, items):
@@ -2523,8 +2895,7 @@ def write_agenda(root, date, items):
              "<!-- Generated by run.py reconcile. One line per thing two "
              "records disagree", "     about, or one record has left open. "
              "The room decides each in turn. -->", ""]
-    for i, (what, how) in enumerate(items, 1):
-        lines += ["%d. %s" % (i, what), "   - %s" % how]
+    lines += render_agenda(items)
     if not items:
         lines.append("Nothing to settle: every branch agrees.")
     path = agenda_path(root, date)
@@ -2542,11 +2913,16 @@ def reconcile_open(root, tag, args):
                "Commit them on %s, or put them aside, then run this again."
                % (", ".join(sorted(left)[:5]),
                   ", …" if len(left) > 5 else "", own_branch(tag)))
-    n = unpushed(root, tag)
-    if n:
-        refuse("you have %d commit(s) on %s that origin does not, and the "
-               "meeting merges what origin holds. Run `git push origin %s`, "
-               "then run this again." % (n, own_branch(tag), own_branch(tag)))
+    # The meeting merges what origin holds, and the keyboard-holder is the
+    # only writer of their own branch, so it pushes for them rather than
+    # sending them away to do it: a meeting that refuses at the moment
+    # everyone is on the call is a meeting that starts late.
+    if has_remote(root):
+        r = git(root, "push", "origin", own_branch(tag))
+        if r.returncode != 0:
+            refuse("your branch could not be pushed, and the meeting merges "
+                   "what origin holds:\n%s\nFix that, then run this again."
+                   % (r.stderr or r.stdout).strip())
     fetch(root)
     if has_ref(root, "main"):
         r = git(root, "checkout", "main")
@@ -2563,21 +2939,24 @@ def reconcile_open(root, tag, args):
         merge_branch(root, ref, other, pages)
     commit(root, rebuild_views(root),
            "reconcile: views rebuilt from every stream")
-    items = agenda_items(root, base, base_time, pages)
+    items = agenda_items(root, base, base_time, pages, date,
+                         sorted({t for t, _ in refs}))
     path = write_agenda(root, date, items)
     commit(root, [rel(path, root)], "reconcile: agenda %s" % date)
     print("Merged %d branch(es) into main; last meeting: %s."
           % (len(refs), last_meeting(root)[1] or "none on record — everything "
              "since the lab started counts as new"))
     print("\nAgenda (%s), also written to %s:" % (date, rel(path, root)))
-    for i, (what, how) in enumerate(items, 1):
-        print("%d. %s\n   - %s" % (i, what, how))
+    for line in render_agenda(items):
+        print(line)
     if not items:
         print("Nothing to settle: every branch agrees.")
-    print("\nDecide each in turn, recording every decision as it is taken "
-          "(`claims.py set ... --actor \"meeting %s (<tags>)\"`, edits to the "
-          "pages above, `run.py note`). Then close the meeting with "
-          "`run.py reconcile --close --present <tags>`." % date)
+    present = ",".join(sorted({t for t, _ in refs}))
+    print("\nDecide each in turn, recording every decision as it is taken: "
+          "`claims.py set ...` or `claims.py affirm ...` with --actor \"%s\", "
+          "edits to the pages above, `run.py note`. Then close the meeting "
+          "with `run.py reconcile --close --present %s`."
+          % (meeting_actor(date, sorted({t for t, _ in refs})), present))
 
 
 def leftover_copies(root):
@@ -2595,14 +2974,48 @@ def leftover_copies(root):
     return sorted(x for x in out if x)
 
 
-def meeting_decisions(root, date):
-    """What the room actually decided, taken from the record rather than
-    from anyone's memory of the discussion."""
-    out = []
+def parse_agenda(path):
+    """The agenda as (number, text), so each decision can be filed under the
+    item it settles."""
+    out, current = [], None
+    for line in path.read_text().splitlines():
+        m = re.match(r"^(\d+)\. (.*)", line)
+        if m:
+            current = [m.group(1), m.group(2)]
+            out.append(current)
+        elif current is not None and line.startswith("   - "):
+            current = None
+        elif current is not None and line.startswith("   "):
+            current[1] += " " + line.strip()
+    return [(n, t) for n, t in out]
+
+
+def meeting_decisions(root, date, since):
+    """What the room actually did, taken from the commits the meeting made
+    rather than from anyone's memory of the discussion: claim events under
+    the meeting's actor, notes it filed, and the hand-written pages it
+    rewrote. Each carries the claim ID or path it is about, so the minutes
+    can file it under the item it settles."""
+    out, seen = [], set()
+    actor = "meeting %s" % date
     for problem in all_problems(root):
         for rec, _ in claims.stream_events(problem):
-            if str(rec.get("actor", "")).startswith("meeting %s" % date):
-                out.append(describe_event(rec))
+            if str(rec.get("actor", "")).startswith(actor):
+                out.append((rec["id"], describe_event(rec)))
+                seen.add(rec["id"])
+    scope = "%s..HEAD" % since if since else "HEAD"
+    for line in git_out(root, "log", scope, "--format=%H %s").splitlines():
+        sha, _, subject = line.partition(" ")
+        if subject.startswith(MEETING_PREFIX) or subject.startswith("reconcile:"):
+            continue
+        files = git_out(root, "show", "--name-only", "--format=", sha).splitlines()
+        for path in files:
+            if Path(path).name in HAND_PAGES:
+                out.append((path, "%s rewritten (%s)" % (path, subject)))
+            elif subject.startswith("note: ") and "/notebook/entries/" in path:
+                text = read_branch_file(root, sha, path) or ""
+                if actor in text:
+                    out.append((path, "note: %s" % subject[6:]))
     return out
 
 
@@ -2624,14 +3037,30 @@ def reconcile_close(root, tag, args):
                "the meeting." % ", ".join(left))
     present = args.present or ",".join(sorted(known_tags(root)))
     tags = [t.strip() for t in present.split(",") if t.strip()]
-    decisions = meeting_decisions(root, date)
+    agenda = parse_agenda(path)
+    since = git_out(root, "log", "-1", "--format=%H", "--", rel(path, root))
+    decisions = meeting_decisions(root, date, since)
     paths = rebuild_views(root)
     body = ["# Meeting — %s" % date, "",
-            "**Present:** %s" % ", ".join(tags), "",
+            "**Present:** %s" % ", ".join(who(root, t) for t in tags), "",
             "## Agenda", "", path.read_text().split("\n", 2)[-1].strip(), "",
-            "## Decisions recorded", ""]
-    body += ["- " + d for d in decisions] or [
-        "- None recorded in the ledger under this meeting's actor."]
+            "## Decisions", ""]
+    # Filed under the item each one settles, so the minutes answer "what
+    # came of item 3" without anybody reconstructing it from the ledger.
+    left = list(decisions)
+    for number, text in agenda:
+        mine = [d for d in left if d[0] and d[0] in text]
+        if not mine:
+            continue
+        left = [d for d in left if d not in mine]
+        body += ["**%s. %s**" % (number, claims.one_line(text, 96)), ""]
+        body += ["- " + d[1] for d in mine] + [""]
+    if left:
+        body += ["**Also decided**", ""] + ["- " + d[1] for d in left] + [""]
+    if not decisions:
+        body += ["- Nothing was recorded under this meeting's actor. An "
+                 "agenda item the room settled but nobody wrote down is one "
+                 "the next meeting argues again.", ""]
     note = meetings_dir(root) / ("%s.md" % date)
     note.write_text("\n".join(body) + "\n")
     paths += [rel(meetings_dir(root), root)]
@@ -2803,6 +3232,16 @@ def main(argv=None):
                     help="replace a transcript already on record")
     tr.set_defaults(func=cmd_transcript)
 
+    up = sub.add_parser("upgrade", help="bring this lab's copies of the "
+                                       "scripts up to the installed kit")
+    up.add_argument("--from", dest="from_dir", metavar="DIR",
+                    help="the installed skill's directory, when it is not "
+                         "where agents usually keep them")
+    up.add_argument("--agree", action="store_true",
+                    help="the Investigator has read the diff and agreed; "
+                         "records the agreement as a note and does the copy")
+    up.set_defaults(func=cmd_upgrade)
+
     j = sub.add_parser("join", help="register this investigator and check out "
                                     "their own branch")
     j.set_defaults(func=cmd_join)
@@ -2827,7 +3266,7 @@ def main(argv=None):
     # Every subcommand takes --problem, including the lab-wide ones, where
     # it says which clone to work in rather than which problem: a flag that
     # is right on six commands and unknown on four is a flag nobody trusts.
-    for q in (n, i, t, c, v, l, w, b, tr, j, m, rc):
+    for q in (n, i, t, c, v, l, w, b, tr, j, m, rc, up):
         q.add_argument("--problem", help="the problem directory (default: found "
                                          "by walking up from here); for "
                                          "lab-wide commands, any directory in "

@@ -39,6 +39,9 @@ MOVES = {
     "superseded": set(),
 }
 TERMINAL = {"refuted": "refuted", "superseded": "superseded"}
+# The statuses that say something was settled: stepping down from one of
+# these is the move that has to carry its reason.
+SETTLED = ("verified", "conditional", "externally-established")
 # Both forms of every ID: the namespaced `R-alice-007` an investigator
 # allocates, and the bare `R-007` of a lab that started before anyone joined.
 # Untagged IDs stay valid and readable for good; nobody renumbers evidence.
@@ -79,11 +82,18 @@ def text_hash(statement, conditions):
 
 def find_problem(explicit):
     if explicit:
-        d = Path(explicit).resolve()
-        if not d.is_dir():
-            refuse("there is no directory at %s. Pass --problem with the path "
-                   "of the problem you mean." % explicit)
-        return d
+        d = Path(explicit)
+        if d.is_dir():
+            return d.resolve()
+        # A bare slug names a problem of this lab. Every listing and every
+        # agenda line spells a problem that way, and a command copied from
+        # one should run rather than refuse over a missing `problems/`.
+        top = git_out(Path.cwd(), "rev-parse", "--show-toplevel")
+        if top and (Path(top) / "problems" / explicit).is_dir():
+            return (Path(top) / "problems" / explicit).resolve()
+        refuse("there is no problem %r here: neither a directory at that path "
+               "nor problems/%s in this lab. Pass --problem with the slug of "
+               "the problem you mean, or its path." % (explicit, explicit))
     here = Path.cwd().resolve()
     for d in [here] + list(here.parents):
         if (d / "claims").is_dir() or d.parent.name == "problems":
@@ -460,6 +470,11 @@ def fold(events):
             c = claims.get(cid)
             if c is None:            # a change whose claim this clone cannot see
                 continue
+            if rec["event"] == "affirm":
+                # A decision that changed nothing still happened, and the
+                # ledger is where it is on record.
+                c["history"].append(rec)
+                continue
             c.update(status=rec["to"], hash=rec["hash"],
                      statement=rec.get("statement", c["statement"]),
                      conditions=rec.get("conditions", c["conditions"]))
@@ -555,13 +570,19 @@ def view_text(c):
               "## Rests on", "", ", ".join(c["rests_on"]) or "Nothing.", "",
               "## History", ""]
     for rec in c["history"]:
+        why = " — \"%s\"" % rec["reason"] if rec.get("reason") else ""
         if rec["event"] == "new":
-            lines.append("- %s — stated as %s, by %s" % (rec["ts"], rec["status"], rec["actor"]))
+            lines.append("- %s — stated as %s, by %s%s"
+                         % (rec["ts"], rec["status"], rec["actor"], why))
+        elif rec["event"] == "affirm":
+            lines.append("- %s — affirmed as %s, by %s%s"
+                         % (rec["ts"], rec["status"], rec["actor"], why))
         else:
             tail = " (%s)" % rec["evidence"] if rec.get("evidence") else ""
             tail += " replaced by %s" % rec["by"] if rec.get("by") else ""
-            lines.append("- %s — %s -> %s, by %s%s"
-                         % (rec["ts"], rec["from"], rec["to"], rec["actor"], tail))
+            lines.append("- %s — %s -> %s, by %s%s%s"
+                         % (rec["ts"], rec["from"], rec["to"], rec["actor"],
+                            tail, why))
     return "\n".join(lines) + "\n"
 
 
@@ -777,15 +798,33 @@ def cmd_set(args):
                "`claims.py new` and cite %s in it; %s stays where it is."
                % (cid, old, old, cid, cid))
     if target == old:
-        refuse("%s is already %s, so there is nothing to change. If you meant to "
-               "record fresh evidence, demote it to proposed first." % (cid, old))
+        refuse("%s is already %s, so a status change would record nothing. If "
+               "the room looked at it and kept it there, that is a decision: "
+               "`claims.py affirm %s --reason \"...\"` puts it on the ledger. "
+               "To record fresh evidence instead, demote it to proposed first."
+               % (cid, old, cid))
     if target not in MOVES[old]:
         refuse("%s is %s, and %s cannot become %s. From %s you may only go to "
                "%s. If the evidence no longer holds, demote it to proposed first."
                % (cid, old, old, target, old, ", ".join(sorted(MOVES[old]))))
 
     evidence = (args.evidence or "").strip()
+    reason = (args.reason or "").strip()
     is_run = bool(RUN_ID.match(evidence))
+    # A claim that was settled and is not any more: the ledger has to say
+    # why, or the next reader finds a demotion with nothing behind it and
+    # re-argues the whole thing. Moving up is its own explanation — the
+    # evidence — so only the step down asks.
+    if old in SETTLED and target in ("proposed", "conditional") and not reason:
+        refuse("%s is %s and this would put it back to %s. Say why with "
+               "--reason: what stopped holding — a replay that no longer runs, "
+               "a dependency that fell, an objection the room accepted. A "
+               "demotion with nothing behind it is re-argued from scratch at "
+               "the next meeting." % (cid, old, target))
+    if target == "conditional" and not (args.conditions or "").strip():
+        refuse("making %s conditional needs --conditions saying what it is "
+               "conditional on, in words. \"Conditional\" with no condition "
+               "written down is a claim nobody can ever discharge." % cid)
     if target == "verified":
         if not evidence:
             refuse("verifying %s needs --evidence naming an ingested run, like "
@@ -896,13 +935,15 @@ def cmd_set(args):
     conditions = view.get("conditions", c["conditions"]).strip()
     if conditions == "None stated.":
         conditions = ""
+    if (args.conditions or "").strip():
+        conditions = args.conditions.strip()
     if statement != c["statement"] or conditions != c["conditions"]:
         print("Note: the statement or conditions in %s.md differ from the "
               "ledger. Recording the file's wording as the claim's text." % cid)
     rec = {"event": "set", "id": cid, "ts": now(), "actor": actor,
            "from": old, "to": target, "evidence": evidence or None,
            "by": args.by, "statement": statement, "conditions": conditions,
-           "hash": text_hash(statement, conditions)}
+           "reason": reason or None, "hash": text_hash(statement, conditions)}
     if target == "verified":
         rec["independence"] = independence
     if rests is not None:
@@ -919,6 +960,28 @@ def cmd_set(args):
             for h in hit:
                 print("  %s [%s] — %s" % (h, claims[h]["status"],
                                           one_line(claims[h]["statement"])))
+
+
+def cmd_affirm(args):
+    """Record a decision that left a claim where it was. A room that looks
+    at a claim, hears the objection and keeps the status has decided
+    something; with nowhere to put that, the ledger shows nothing happened
+    and the same claim is argued again at the next meeting."""
+    problem = find_problem(args.problem)
+    tag = require_own_branch(git_root(problem), "an affirmation")
+    actor = resolve_actor(args.actor, tag)
+    known, _ = load(problem)
+    cid = args.claim
+    if cid not in known:
+        refuse("%s is not a claim in this ledger, so there is nothing to "
+               "affirm. Run `claims.py check` to see the claims on file." % cid)
+    c = known[cid]
+    append(problem, {"event": "affirm", "id": cid, "ts": now(), "actor": actor,
+                     "status": c["status"], "hash": c["hash"],
+                     "reason": (args.reason or "").strip() or None}, tag)
+    regenerate(problem)
+    commit(problem, "%s affirmed (%s)" % (cid, c["status"]))
+    print("%s affirmed as %s." % (cid, c["status"]))
 
 
 def cmd_rebuild(args):
@@ -996,11 +1059,24 @@ def main(argv=None):
     s.add_argument("--rests-on", action="append", dest="rests_on",
                    help="claim IDs this one's proof depends on (or: none); "
                         "required when verifying a claim with none recorded")
+    s.add_argument("--reason", help="why the status is changing, in words; "
+                                    "required when a settled claim steps back "
+                                    "to proposed or conditional")
+    s.add_argument("--conditions", help="what the claim is conditional on; "
+                                        "required when the target is "
+                                        "conditional, and replaces what is on "
+                                        "record")
     s.add_argument("--accept-same-model",
                    action="store_true",
                    help="allow evidence from the same model that discovered "
                         "the claim; recorded as Independence: none")
     s.set_defaults(func=cmd_set)
+
+    a = sub.add_parser("affirm", help="record a decision that leaves the "
+                                      "status where it is")
+    a.add_argument("claim")
+    a.add_argument("--reason", help="what the room decided, in words")
+    a.set_defaults(func=cmd_affirm)
 
     c = sub.add_parser("check", help="advisory lint; never fails")
     c.set_defaults(func=cmd_check, actor=None)
@@ -1009,10 +1085,11 @@ def main(argv=None):
                                        "ledgers; changes nothing else")
     b.set_defaults(func=cmd_rebuild, actor=None)
 
-    for q in (n, s, c, b):
-        q.add_argument("--problem", help="the problem directory (default: found "
-                                         "by walking up from here)")
-    for q in (n, s):
+    for q in (n, s, c, b, a):
+        q.add_argument("--problem", help="the problem: its slug, or its path "
+                                         "(default: found by walking up from "
+                                         "here)")
+    for q in (n, s, a):
         q.add_argument("--actor", help="who is making this change (default: "
                                        "your investigator tag, once anyone "
                                        "has joined the lab)")

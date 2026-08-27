@@ -167,6 +167,12 @@ a source (the paper or book, or "Investigator, intake").
   refereed it.
   *Source:* `references/claims.md`, "The six statuses", "The moves between
   them".
+- **Affirm** — recording a decision that leaves a claim's status where it
+  is, with the reason. Otherwise a room that considered a claim and kept it
+  leaves no trace, and the next meeting argues it again.
+  *Example:* `claims.py affirm C-005 --reason "the objection was answered in
+  the run"`.
+  *Source:* `references/claims.md`, "Deciding to change nothing".
 - **Promotion / demotion** — a status change up or down, only through
   `claims.py`, never by editing a file, never by the run that made the
   discovery.
@@ -260,6 +266,12 @@ a source (the paper or book, or "Investigator, intake").
   `run.py new --duplicates <run>`. Catchup names the pair until the original
   is closed, so two people doing one job is seen the same day.
   *Source:* `references/runs.md`, "Joining a lab".
+- **Kit version** — which release of the kit this lab's copies of the
+  scripts came from, in `lab.json` as `kit_version`. Catchup says when the
+  installed kit is newer; `run.py upgrade` shows the diff and, on the
+  Investigator's word, brings the copies over and files a note.
+  *Example:* "The installed kit is 1.3.0; this lab's scripts are 1.1.0."
+  *Source:* `references/runs.md`, "Upgrading a lab".
 - **Session rotation** — starting a fresh Director session because the
   current one has run long. Proposed to the Investigator with the reason;
   done on their word; the next session opens with catchup.

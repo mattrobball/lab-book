@@ -4,7 +4,7 @@ description: >-
   Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
-  version: "1.2.3"
+  version: "1.3.0"
 ---
 
 # Lab book
@@ -74,8 +74,10 @@ Then scaffold the lab repository:
    - `scripts/run.py` → `run.py`
    - `assets/templates/` → `templates/`
 3. Write `lab.json` from the discovery results — the models, launch commands,
-   and confirmed tools. Its shape is in `references/runs.md`; the skill ships no
-   models or commands of its own.
+   and confirmed tools, plus `kit_version` from this SKILL.md's
+   `metadata.version`, so the lab knows which kit its copies came from. Its
+   shape is in `references/runs.md`; the skill ships no models or commands of
+   its own.
 4. `run.py join`. It registers this Investigator in `lab.json` from git's
    `user.name`, creates their branch `lab/<tag>`, writes a `.gitignore` for
    byte-compiled files, and commits — in a fresh lab that is the first
@@ -92,7 +94,11 @@ Then scaffold the lab repository:
 The copies are deliberate. A lab repository holds its own charter, scripts, and
 templates, so it stays self-contained and replayable — a run ingested a year ago
 can be re-read and replayed against the code that was actually used, even after
-this skill has moved on.
+this skill has moved on. What that costs is knowing when this skill has:
+catchup says one line when the installed kit is newer than the lab's
+`kit_version`, and `run.py upgrade` shows the diff and copies it over on the
+Investigator's word, keeping the lab's own charter sections. See "Upgrading a
+lab" in `references/runs.md`.
 
 ## Pointers
 

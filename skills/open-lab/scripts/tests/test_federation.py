@@ -10,6 +10,7 @@ Run from open-lab/scripts/tests/:  python3 -m unittest
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -166,6 +167,10 @@ class TestJoin(FederationCase):
         self.assertEqual(self.branch(self.alice), "lab/alice")
         self.assertEqual(list(self.lab_json(self.alice)["investigators"]),
                          ["alice"])
+
+        version = re.search(r'version:\s*"?([0-9][^"\s]*)"?',
+                            (SCRIPTS.parent / "SKILL.md").read_text()).group(1)
+        self.assertEqual(self.lab_json(self.alice)["kit_version"], version)
 
         who = self.ok(self.alice, "whoami", cwd=self.alice).stdout
         self.assertIn("tag: alice", who)
@@ -444,7 +449,7 @@ class TestMeeting(FederationCase):
                 if not p.name.endswith("-agenda.md")]
         self.assertEqual(len(note), 1)
         filed = note[0].read_text()
-        self.assertIn("**Present:** alice, bob", filed)
+        self.assertIn("**Present:** Alice (alice), Bob (bob)", filed)
         self.assertIn("C-bob-001", filed)
         # Every branch now starts from main, here and on the remote.
         head = git(self.alice, "rev-parse", "main").stdout.strip()
@@ -458,6 +463,92 @@ class TestMeeting(FederationCase):
         self.assertEqual(git(self.bob, "rev-parse", "HEAD").stdout.strip(), head)
         self.assertEqual(self.branch(self.alice), "lab/alice")
         self.assertEqual(git(self.alice, "status", "--porcelain").stdout.strip(), "")
+
+    def test_a_claim_two_streams_disagree_on_runs_through_the_meeting(self):
+        """The whole path: two streams leave one claim in two states, the
+        agenda says so in words the room can act on, the decision is
+        recorded, and the minutes file it under the item it settles."""
+        self.join(self.alice)
+        self.join(self.bob)
+        self.work(self.alice, headline="Alice found it.",
+                  proposed=["The bound in dimension 4 is 20."])
+        git(self.bob, "fetch", "-q", "origin")
+        # Bob reads Alice's claim stream onto his branch, as the meeting
+        # would have left it after any earlier one.
+        git(self.bob, "checkout", "origin/lab/alice", "--",
+            "problems/demo/claims/ledger-alice.jsonl")
+        git(self.bob, "commit", "-q", "-m", "read alice's claim stream")
+        self.claims_ok(self.bob, "set", "C-alice-001", "refuted",
+                       "--reason", "a counterexample at n = 12",
+                       "--problem", "demo")
+        git(self.bob, "push", "-q", "origin", "lab/bob")
+        self.claims_ok(self.alice, "affirm", "C-alice-001",
+                       "--reason", "the counterexample misreads the bound",
+                       "--problem", "demo")
+        git(self.alice, "push", "-q", "origin", "lab/alice")
+
+        r = self.ok(self.alice, "reconcile", cwd=self.alice)
+        out = r.stdout
+        # The folded status is what the views show; the sentence also says
+        # whose event was the last word, whoever that turns out to be.
+        self.assertIn("C-alice-001 is currently refuted", out)
+        self.assertIn("Bob (bob) has it refuted", out)
+        self.assertIn("Alice (alice) has it proposed", out)
+        self.assertIn("a counterexample at n = 12", out)     # each side's reason
+        self.assertIn("the counterexample misreads the bound", out)
+        self.assertIn("is the latest", out)
+        # The command is ready to run: real date, real tags, the problem's slug.
+        self.assertIn('--actor "meeting %s (alice,bob)"' % self.today(), out)
+        self.assertIn("--problem demo", out)
+        self.assertNotIn("<date>", out)
+        self.assertNotIn("<tags>", out)
+
+        # The room decides, and rewrites the page out of what it decided.
+        # The folded status is already refuted, so the room's decision is to
+        # keep it there — which is a decision, and goes on the ledger.
+        self.claims_ok(self.alice, "affirm", "C-alice-001",
+                       "--reason", "the room accepted the counterexample",
+                       "--actor", "meeting %s (alice,bob)" % self.today(),
+                       "--problem", "demo")
+        (self.problem(self.alice) / "STATUS.md").write_text(
+            "# Status: demo\n\n## Bottom line\n\nThe bound is open again.\n")
+        git(self.alice, "add", "problems/demo/STATUS.md")
+        git(self.alice, "commit", "-q", "-m", "status: the bound is open again")
+        self.ok(self.alice, "reconcile", "--close", "--present", "alice,bob",
+                cwd=self.alice)
+        filed = [p for p in (self.alice / "notebook" / "meetings").iterdir()
+                 if not p.name.endswith("-agenda.md")][0].read_text()
+        self.assertIn("## Decisions", filed)
+        self.assertIn("C-alice-001 affirmed as refuted", filed)
+        self.assertIn("the room accepted the counterexample", filed)
+        self.assertIn("STATUS.md rewritten (status: the bound is open again)",
+                      filed)
+        # Filed under the item it settles, not in a heap at the end.
+        first = filed.split("## Decisions")[1]
+        self.assertIn("**1.", first)
+
+        # And afterwards nobody's branch reads as new work.
+        git(self.alice, "fetch", "-q", "origin")
+        others = self.ok(self.alice, "catchup").stdout.split(
+            "Other investigators")[1]
+        self.assertIn("nothing since the last meeting", others)
+
+    def test_a_clone_catches_its_branch_up_after_the_meeting(self):
+        self.join(self.alice)
+        self.join(self.bob)
+        self.work(self.bob, headline="Bob's run.")
+        self.ok(self.alice, "reconcile", cwd=self.alice)
+        self.ok(self.alice, "reconcile", "--close", "--present", "alice,bob",
+                cwd=self.alice)
+        out = self.ok(self.bob, "catchup").stdout
+        self.assertIn("the meeting moved it", out)
+        self.assertIn("fast-forwarded", out)
+        self.assertEqual(git(self.bob, "rev-parse", "HEAD").stdout.strip(),
+                         git(self.alice, "rev-parse", "main").stdout.strip())
+
+    def today(self):
+        import datetime
+        return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     def test_catchup_defaults_to_the_last_meeting(self):
         self.join(self.alice)
@@ -481,15 +572,21 @@ class TestMeeting(FederationCase):
                          git(self.alice, "rev-parse", "main").stdout)
         self.assertIn("meeting:", git(self.alice, "log", "--pretty=%s").stdout)
 
-    def test_reconcile_refuses_on_a_dirty_tree_or_unpushed_work(self):
+    def test_reconcile_refuses_a_dirty_tree_and_pushes_for_you(self):
+        """The keyboard-holder is the only writer of their own branch, so
+        the meeting pushes it rather than sending them away to do it."""
         self.join(self.alice)
         (self.problem(self.alice) / "STATUS.md").write_text("# half a thought\n")
         err = self.refused(self.alice, "reconcile", cwd=self.alice)
         self.assertIn("uncommitted", err)
         git(self.alice, "add", "problems/demo/STATUS.md")
         git(self.alice, "commit", "-q", "-m", "status")
-        err = self.refused(self.alice, "reconcile", cwd=self.alice)
-        self.assertIn("git push origin lab/alice", err)
+        ahead = git(self.alice, "rev-list", "--count",
+                    "origin/lab/alice..lab/alice").stdout.strip()
+        self.assertEqual(ahead, "1")
+        self.ok(self.alice, "reconcile", cwd=self.alice)
+        self.assertEqual(git(self.alice, "rev-parse", "origin/lab/alice").stdout,
+                         git(self.alice, "rev-parse", "lab/alice").stdout)
 
 
 if __name__ == "__main__":

@@ -629,12 +629,14 @@ class TestSpine(LabCase):
                           "bound is 17.\n\n## Ruled out\n\nC-001 is not a "
                           "lower bound.\n")
         out = self.ok("catchup", "2020-01-01").stdout
-        self.assertIn("states as settled what is only proposed", out)
-        self.assertIn('- C-001 in "Bottom line"', out)
+        self.assertIn("without the label", out)
+        self.assertIn('cites C-001, which is proposed, without the label', out)
+        self.assertIn('"Bottom line"', out)
         self.assertNotIn('"Ruled out"', out)
         status.write_text("# Status: demo\n\n## Bottom line\n\nBy C-001 "
                           "(proposed, unreviewed), the bound is 17.\n")
-        self.assertNotIn("only proposed", self.ok("catchup", "2020-01-01").stdout)
+        self.assertNotIn("without the label",
+                         self.ok("catchup", "2020-01-01").stdout)
 
     def test_rotation_is_proposed_after_n_ingests_in_one_session(self):
         """F-020: nothing said when a session had run long. The notice is
@@ -979,6 +981,95 @@ class TestHousekeeping(LabCase):
         rid = r.stdout.split()[0]
         e = json.loads((self.problem / "runs" / rid / "execution.json").read_text())
         self.assertEqual(e["usage"], {"cost": "5"})
+
+
+class TestUpgrade(LabCase):
+    """A lab holds its own copies of the scripts on purpose. What that costs
+    is knowing when the installed kit has moved on."""
+
+    def setUp(self):
+        super().setUp()
+        (self.root / "run.py").write_text("# the lab's run.py\n")
+        (self.root / "claims.py").write_text("# the lab's claims.py\n")
+        (self.root / "GLOSSARY.md").write_text("# Glossary\n\nold words\n")
+        (self.root / "templates").mkdir()
+        (self.root / "templates" / "BRIEF.md").write_text("old brief\n")
+        (self.root / "AGENTS.md").write_text(
+            "# Director charter\n\n## The loop\n\nold loop\n\n"
+            "## This Investigator\n\n- **Ann** — reads on a phone.\n")
+        self.stamp("1.0.0")
+
+    def stamp(self, version):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg["kit_version"] = version
+        (self.root / "lab.json").write_text(json.dumps(cfg))
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "the lab's own copies")
+
+    def kit(self, version="9.9.9"):
+        d = Path(tempfile.mkdtemp(prefix="labkit-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        (d / "SKILL.md").write_text('---\nname: open-lab\nmetadata:\n'
+                                    '  version: "%s"\n---\n# Lab book\n'
+                                    % version)
+        (d / "scripts").mkdir()
+        (d / "scripts" / "run.py").write_text("# the kit's run.py\n")
+        (d / "scripts" / "claims.py").write_text("# the kit's claims.py\n")
+        (d / "assets" / "templates").mkdir(parents=True)
+        (d / "assets" / "templates" / "BRIEF.md").write_text("new brief\n")
+        (d / "assets" / "GLOSSARY.md").write_text("# Glossary\n\nnew words\n")
+        (d / "assets" / "AGENTS.md").write_text(
+            "# Director charter\n\n## The loop\n\nnew loop\n\n"
+            "## Pointers\n\nnew pointers\n")
+        return d
+
+    def test_it_shows_the_diff_and_refuses_without_the_investigators_word(self):
+        r = self.run_py("upgrade", "--from", str(self.kit()), cwd=self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("kit 1.0.0", r.stdout)
+        self.assertIn("9.9.9", r.stdout)
+        self.assertIn("the kit's run.py", r.stdout)          # the full diff
+        self.assertIn("|", r.stdout)                         # the diffstat
+        self.assertIn("not modified by the party it judges", r.stderr)
+        self.assertEqual((self.root / "run.py").read_text(),
+                         "# the lab's run.py\n")
+
+    def test_agreeing_copies_the_kit_and_keeps_the_labs_own_sections(self):
+        r = self.ok("upgrade", "--from", str(self.kit()), "--agree",
+                    cwd=self.root)
+        self.assertIn("canary", r.stdout)
+        self.assertEqual((self.root / "run.py").read_text(),
+                         "# the kit's run.py\n")
+        self.assertEqual((self.root / "templates" / "BRIEF.md").read_text(),
+                         "new brief\n")
+        charter = (self.root / "AGENTS.md").read_text()
+        self.assertIn("new loop", charter)
+        self.assertIn("new pointers", charter)
+        self.assertIn("## This Investigator", charter)       # binding, kept
+        self.assertIn("reads on a phone", charter)
+        self.assertNotIn("old loop", charter)
+        self.assertEqual(json.loads((self.root / "lab.json").read_text())
+                         ["kit_version"], "9.9.9")
+        self.assertIn("upgrade: kit 1.0.0 -> 9.9.9", self.log())
+        # The Investigator's agreement is on record before the next run.
+        entry = (self.problem / "notebook" / "entries" /
+                 self.entries()[0]).read_text()
+        self.assertIn("agreed", entry)
+        self.assertIn("9.9.9", entry)
+
+    def test_the_same_version_changes_nothing(self):
+        r = self.ok("upgrade", "--from", str(self.kit("1.0.0")), "--agree",
+                    cwd=self.root)
+        self.assertIn("nothing to bring over", r.stdout)
+        self.assertEqual((self.root / "run.py").read_text(),
+                         "# the lab's run.py\n")
+
+    def test_catchup_says_when_the_installed_kit_is_newer(self):
+        self.stamp("0.0.1")
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("The installed kit is", out)
+        self.assertIn("this lab's scripts are 0.0.1", out)
+        self.assertIn("run.py upgrade", out)
 
 
 class TestLargeOutputs(LabCase):

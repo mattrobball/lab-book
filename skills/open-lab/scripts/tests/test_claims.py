@@ -124,8 +124,19 @@ class TestTransitions(LabCase):
         cid = self.new("A holds.")
         self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
                 "--rests-on", "none")
-        self.ok("set", cid, "conditional", "--actor", "bob")
+        err = self.refused("set", cid, "conditional", "--actor", "bob",
+                           "--conditions", "given the symmetry reduction")
+        self.assertIn("--reason", err)
+        err = self.refused("set", cid, "conditional", "--actor", "bob",
+                           "--reason", "the reduction is not checked here")
+        self.assertIn("--conditions", err)
+        self.ok("set", cid, "conditional", "--actor", "bob",
+                "--reason", "the reduction it uses is not checked here",
+                "--conditions", "given the symmetry reduction")
         self.assertEqual(self.status_of(cid), "conditional")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("given the symmetry reduction", view)
+        self.assertIn("not checked here", view)          # the reason, in History
 
     def test_proposed_to_verified_checks_dependencies_too(self):
         """F-006: the rests-on check once ran only from conditional."""
@@ -216,7 +227,8 @@ class TestPromotionGates(LabCase):
         self.ingest_run("R-002")
         base = self.new("The bound is 224.", actor="alice")
         dep = self.new("Therefore the gap closes.", actor="carol", rests_on=base)
-        self.ok("set", dep, "conditional", "--actor", "bob")
+        self.ok("set", dep, "conditional", "--actor", "bob",
+                "--conditions", "given %s" % base)
         err = self.refused("set", dep, "verified", "--actor", "bob",
                            "--evidence", "R-002")
         self.assertIn("rests on %s (proposed)" % base, err)
@@ -277,6 +289,49 @@ class TestStatusAtBirth(LabCase):
         self.assertIn("nobody has joined", err)
 
 
+class TestAffirm(LabCase):
+    """A room that looks at a claim, hears the objection and keeps the
+    status has decided something."""
+
+    def test_an_affirmation_is_on_the_ledger_and_in_the_history(self):
+        cid = self.new("A holds.")
+        err = self.refused("set", cid, "proposed", "--actor", "bob")
+        self.assertIn("affirm %s" % cid, err)
+        r = self.ok("affirm", cid, "--actor", "meeting 2026-08-27 (alice,bob)",
+                    "--reason", "the objection was answered in the run")
+        self.assertIn("affirmed as proposed", r.stdout)
+        events = [json.loads(x) for x in
+                  (self.problem / "claims" / "ledger.jsonl").read_text().splitlines()
+                  if x.strip()]
+        self.assertEqual(events[-1]["event"], "affirm")
+        self.assertEqual(events[-1]["status"], "proposed")
+        self.assertEqual(events[-1]["actor"], "meeting 2026-08-27 (alice,bob)")
+        view = (self.problem / "claims" / (cid + ".md")).read_text()
+        self.assertIn("affirmed as proposed", view)
+        self.assertIn("the objection was answered", view)
+        self.assertIn("%s affirmed (proposed)" % cid,
+                      git(self.root, "log", "--pretty=%s").stdout)
+        self.assertEqual(self.status_of(cid), "proposed")
+
+    def test_an_unknown_claim_is_refused(self):
+        err = self.refused("affirm", "C-404", "--actor", "bob")
+        self.assertIn("not a claim in this ledger", err)
+
+
+class TestProblemBySlug(LabCase):
+
+    def test_a_bare_slug_names_the_problem(self):
+        """Every listing and every agenda line spells a problem by its slug;
+        a command copied from one should run."""
+        r = self.ok("new", "--statement", "A holds.", "--actor", "alice",
+                    "--problem", "demo", cwd=self.root)
+        self.assertEqual(claim_id(r.stdout), "C-001")
+        self.assertTrue((self.problem / "claims" / "ledger.jsonl").exists())
+        err = self.refused("new", "--statement", "x", "--actor", "a",
+                           "--problem", "no-such-problem", cwd=self.root)
+        self.assertIn("no problem", err)
+
+
 class TestCheck(LabCase):
 
     def test_check_flags_text_drift(self):
@@ -316,10 +371,12 @@ class TestSpine(LabCase):
         self.assertEqual(cid, "C-001")
         self.assertEqual(self.commits(), before + 1)
 
-        self.ok("set", cid, "conditional", "--actor", "director")
+        self.ok("set", cid, "conditional", "--actor", "director",
+                "--conditions", "given the bound of the previous section")
         self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-007",
                 "--rests-on", "none")
-        self.ok("set", cid, "proposed", "--actor", "director")
+        self.ok("set", cid, "proposed", "--actor", "director",
+                "--reason", "the replay no longer runs on this machine")
         self.ok("set", cid, "verified", "--actor", "bob", "--evidence", "R-011",
                 "--rests-on", "none")
         self.assertEqual(self.status_of(cid), "verified")

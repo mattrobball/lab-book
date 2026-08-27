@@ -123,6 +123,9 @@ Several people can share one lab, each with their own copy of it.
   down before the next.
 - Afterwards everyone is back on the same page, literally, and the minutes
   of the meeting are in the notebook.
+- Everyone runs the same version of the tooling, because the lab keeps its
+  own copy of it: the Director says when a newer one is installed and asks
+  before bringing it in.
 
 This prevents the two failures that end shared work: two people quietly
 believing different things until it matters, and a day spent untangling
