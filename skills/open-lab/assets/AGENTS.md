@@ -94,7 +94,9 @@ information. Do not work around one.
    explicit agreement, recorded as a note before the commit.** The gate is
    not casually modified by the party it judges. After any such change, run
    one small canary dispatch and ingest it clean before resuming normal work
-   — the one fence patch that skipped this shipped broken.
+   — the one fence patch that skipped this shipped broken. This does not
+   cover `lab.local.json`: what one machine can run is that person's own
+   business, changed freely and never committed.
 
 Everything else here is advisory.
 
@@ -193,10 +195,13 @@ across repositories is a citation, never a dependency.
   charter, along with `templates/`.
 - `problems/<slug>/STATUS.md` is the current bottom line for a problem. It is
   hand-written, so assume it lags a little.
-- `lab.json` holds the models, launch commands, and tools confirmed on this
-  machine, and which roles are on hold until when. Role availability is a
-  `lab.json` fact, never a memory: a hold that lives in your head is a run
-  lost before it starts.
+- `lab.local.json` holds the models, launch commands, and tools confirmed on
+  this machine, and which roles are on hold until when. It is never
+  committed: a machine is not a fact about the lab. Role availability is a
+  file's fact, never a memory: a hold that lives in your head is a run lost
+  before it starts. `lab.json` holds what the group owns — the
+  investigators, the kit version, the caps, and `policy`, the standing rules
+  everyone joining is read.
 - `problems/<slug>/sources/` holds cached literature with a hash manifest and
   `QUERIES.md`, the append-only log of searches and answers — so the
   searching is done once. An inaccessible source gets a manifest line saying

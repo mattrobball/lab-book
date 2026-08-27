@@ -42,7 +42,11 @@ which workers exist, how they launch, what they are for, and whether they
 are on hold. One lab kept "stalls on reading-heavy tasks" in a memory
 instead, and sent that worker three more reading-heavy tasks.
 
-Every key the scripts read, in one example:
+The configuration is two files, because two different things live in it.
+
+`lab.local.json` — this person, this machine. Never committed; the
+`.gitignore` the scaffold writes names it. Yours to change freely, without
+asking anyone: it says what your machine can run.
 
 ```json
 {
@@ -59,14 +63,32 @@ Every key the scripts read, in one example:
     }
   },
   "tools": ["<confirmed-tool>", "<confirmed-tool>"],
-  "machine": {"max_heavy_runs": 2, "rotate_after_ingests": 12},
+  "machine": {"max_heavy_runs": 2, "rotate_after_ingests": 12}
+}
+```
+
+`lab.json` — the group. Committed, and changed the way any rule is changed:
+with the Investigator's agreement, recorded as a note.
+
+```json
+{
+  "investigators": {},
+  "kit_version": "<the kit this lab's copies came from>",
   "commits": {"max_mb": 50},
   "transcripts": {"max_mb": 20},
   "sources": {"refetch_days": 30},
-  "kit_version": "<the kit this lab's copies came from>",
-  "investigators": {}
+  "policy": ["a check goes to a role whose model differs from the discoverer's"]
 }
 ```
+
+The scripts read the two as one, this machine's answers over the group's,
+role by role within `roles`. The split is there because a machine is not a
+fact about the lab: one lab committed launch commands that were absolute
+paths on the founder's machine, and the second person's Director dispatched
+to a binary that was not there. A lab that still keeps roles, tools or
+machine in the shared file works exactly as before; catchup says so, and
+`run.py localize` moves them across, on the Investigator's word and with a
+note, leaving the shared file to the group.
 
 Only `roles.<role>.model` and, for a role that launches itself, `command`
 are needed. `note` is printed at every dispatch; `unavailable_until` is a
@@ -76,10 +98,12 @@ groups read over the worker's log when the built-in token shapes do not fit.
 `transcript` says where that worker's session file lives ("Transcripts").
 `machine.max_heavy_runs` is the Director's ceiling on compute-heavy workers
 at once; `machine.rotate_after_ingests` is when a session is told it has run
-long. `commits.max_mb` is the largest file ingest will put in the history;
-`transcripts.max_mb` caps what is copied into the record;
-`sources.refetch_days` is when a baseline is called stale. `kit_version` and `investigators`
-are written by `run.py join` and `run.py upgrade` — never by hand.
+long. On the shared side, `commits.max_mb` is the largest file ingest will
+put in the history; `transcripts.max_mb` caps what is copied into the
+record; `sources.refetch_days` is when a baseline is called stale; `policy`
+is the group's own standing rules in plain sentences, read to anyone
+joining. `kit_version` and `investigators` are written by `run.py join` and
+`run.py upgrade` — never by hand.
 
 The skill ships no models or commands. `run.py new` refuses a dispatch to a role on hold, printing the
 note, and dispatches normally once the date has passed, so nobody has to
@@ -112,7 +136,19 @@ boards update: catchup flags any baseline line fetched more than
 ## Joining a lab
 
 Every investigator runs `run.py join` once per clone, before their first
-write; in a fresh lab it makes the first commit itself. For a person who has
+write; in a fresh lab it makes the first commit itself. Joining someone
+else's lab has three more steps, in this order. The Director reads the
+joiner what this lab counts as evidence (the problem README's "What counts
+as evidence"), its constraints, and the `policy` lines in `lab.json`, and
+asks them to say they will work under them: a lab where two people hold two
+standards of proof produces two kinds of result and finds out at the paper.
+A joiner who disagrees is not talked round and nothing is changed on the
+spot — the disagreement is filed as a note and goes on the next meeting's
+agenda. Then the environment is discovered on this machine and written to
+`lab.local.json`: their models, their launch commands, their tools. Then the
+sixth intake question — how they want to be talked to — becomes their
+`## This Investigator` block in `AGENTS.md`, committed on their branch and
+pushed. For a person who has
 cloned a lab others started, the Director gives them catchup first — it is
 read-only and needs no join — then asks whether they mean to contribute;
 if so it runs `join`, asks only the sixth intake question, and files their

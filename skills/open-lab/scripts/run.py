@@ -366,7 +366,7 @@ def guard_foreign_runs(root, staged):
     sys.exit(1)
 
 
-GITIGNORE_LINES = ("__pycache__/", "*.pyc")
+GITIGNORE_LINES = ("__pycache__/", "*.pyc", claims.LOCAL_CONFIG)
 PYCACHE_MARK = "# Byte-compiled files are not part of the record."
 SOURCES_LINES = ("problems/*/sources/*", "!problems/*/sources/MANIFEST.md",
                  "!problems/*/sources/QUERIES.md")
@@ -1940,6 +1940,7 @@ def cmd_catchup(args):
     status_report(problem)
     baseline_report(problem, root)
     catchup_lints(problem, root)
+    config_notice(root)
     kit_notice(root)
 
 
@@ -2419,10 +2420,11 @@ def cmd_upgrade(args):
                 shutil.copytree(str(theirs), str(mine), dirs_exist_ok=True)
             else:
                 shutil.copy2(str(theirs), str(mine))
-    cfg = lab_config(root)
+    # The shared file, never the merged view: writing that back would put
+    # this machine's launch commands into everybody's copy.
+    cfg = claims.shared_config(root)
     cfg["kit_version"] = new_version
-    (root / "lab.json").write_text(json.dumps(cfg, indent=2, sort_keys=True)
-                                   + "\n")
+    claims.write_config(root / claims.SHARED_CONFIG, cfg)
     paths = [name for name, _ in KIT_FILES] + ["lab.json"]
     problem = upgrade_note_problem(root)
     if problem is not None:
@@ -2507,7 +2509,7 @@ def cmd_join(args):
     # The registry is read again here: the branch just checked out carries
     # its own lab.json, and registering from the previous branch's copy
     # would drop whoever it does not know about.
-    cfg = lab_config(root)
+    cfg = claims.shared_config(root)
     reg = cfg.get("investigators") or {}
     if tag in reg:
         print("Already registered as %s (%s). You are on %s; nothing else "
@@ -2518,14 +2520,112 @@ def cmd_join(args):
     # Which kit this lab's copies came from, so `run.py upgrade` and catchup
     # can tell when the installed one has moved on.
     cfg.setdefault("kit_version", kit_version(installed_kit() or ""))
-    (root / "lab.json").write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
-    commit(root, ["lab.json", ".gitignore"], "join: %s (%s)" % (tag, name))
+    claims.write_config(root / claims.SHARED_CONFIG, cfg)
+    ensure_local_config(root)
+    commit(root, [claims.SHARED_CONFIG, ".gitignore"],
+           "join: %s (%s)" % (tag, name))
     push_own_branch(root, tag)
     print("Joined as %s (%s), on branch %s. Your runs and claims are now "
           "numbered in your own namespace (R-%s-001, C-%s-001); everything "
           "already on file keeps the ID it has. The others' work is read with "
           "`run.py catchup`, and agreed at a meeting with `run.py reconcile`."
           % (tag, name, branch, tag, tag))
+
+
+def ensure_local_config(root):
+    """This machine's own settings file, which is never committed. A stub is
+    written when there is none, so somebody who has just joined has the file
+    to fill in and the scripts have somewhere to read it from: launch
+    commands are absolute paths on one machine, and committed for everyone
+    they send the next person's Director at a binary that is not there."""
+    path = Path(root) / claims.LOCAL_CONFIG
+    if path.exists():
+        return False
+    claims.write_config(path, {"roles": {}, "tools": [], "machine": {}})
+    print("Wrote %s, this machine's own settings — never committed, yours to "
+          "change freely. It has no roles in it yet: discover what this "
+          "machine can run and put the workers there (model, launch command, "
+          "budgets, where its transcripts live). %s keeps what the group "
+          "owns." % (claims.LOCAL_CONFIG, claims.SHARED_CONFIG))
+    return True
+
+
+def cmd_localize(args):
+    """Move this machine's settings out of the file everyone shares. What a
+    machine can run is not a fact about the lab: one lab's committed launch
+    commands were absolute paths on the founder's machine, and the second
+    person's dispatches went to a binary that did not exist there."""
+    root = lab_root(args.problem)
+    tag = require_own_branch(root, "moving settings out of the shared file")
+    shared = claims.shared_config(root)
+    moving = {k: shared[k] for k in claims.LOCAL_KEYS if k in shared}
+    made = ensure_local_config(root)
+    if not moving:
+        ensure_gitignore(root)
+        commit(root, [".gitignore"], "localize: ignore %s" % claims.LOCAL_CONFIG)
+        print("%s holds nothing about this machine%s; nothing to move."
+              % (claims.SHARED_CONFIG,
+                 " (a stub is now waiting for you)" if made else ""))
+        return
+    print("%s would move out of %s and into %s, which stays on this machine."
+          % (", ".join(sorted(moving)), claims.SHARED_CONFIG,
+             claims.LOCAL_CONFIG))
+    if not args.agree:
+        refuse("nothing has been changed. This edits the file the group "
+               "shares, so it goes the way every change to that file goes: "
+               "read it with the Investigator, and run `run.py localize "
+               "--agree` on their word. That records their agreement as a "
+               "note and does the move in one commit.")
+    local = claims.local_config(root)
+    for key, value in moving.items():
+        if key == "roles":
+            roles = dict(value)
+            roles.update(local.get("roles") or {})   # what is here already wins
+            local["roles"] = roles
+        elif not local.get(key):
+            # An empty value in the stub is not an answer, so it does not
+            # count as this machine having said something already.
+            local[key] = value
+        shared.pop(key)
+    claims.write_config(root / claims.LOCAL_CONFIG, local)
+    claims.write_config(root / claims.SHARED_CONFIG, shared)
+    ensure_gitignore(root)
+    paths = [claims.SHARED_CONFIG, ".gitignore"]
+    problem = upgrade_note_problem(root)
+    if problem is not None:
+        entry = file_entry(problem, "Machine settings moved to %s"
+                           % claims.LOCAL_CONFIG,
+                           "%s | localize | — | %s out of %s"
+                           % (today(), ", ".join(sorted(moving)),
+                              claims.SHARED_CONFIG),
+                           "**Actor:** %s · **Kind:** Director note (no packet, "
+                           "no claims)\n\nThe Investigator agreed to move %s "
+                           "out of %s (`run.py localize --agree`). Those keys "
+                           "describe one machine, not the lab: each clone now "
+                           "answers for its own workers in %s, which is never "
+                           "committed. What the group owns — investigators, "
+                           "the kit version, the caps, the policy — stays "
+                           "shared."
+                           % (claims.resolve_actor(None, tag) if tag
+                              else "director", ", ".join(sorted(moving)),
+                              claims.SHARED_CONFIG, claims.LOCAL_CONFIG), tag)
+        paths.append(rel(problem / "notebook", root))
+        print("Note filed: %s" % rel(entry, root))
+    commit(root, paths, "localize: %s out of %s"
+           % (", ".join(sorted(moving)), claims.SHARED_CONFIG))
+    push_own_branch(root, tag)
+    print("Moved. Everyone else does the same on their own clone, with the "
+          "settings their machine actually has.")
+
+
+def config_notice(root):
+    """One line while this machine's settings are still in the shared file."""
+    stray = [k for k in claims.LOCAL_KEYS if k in claims.shared_config(root)]
+    if stray:
+        print("\n%s still holds %s — settings about one machine, in the file "
+              "the whole group shares. `run.py localize` moves them into %s, "
+              "which stays here." % (claims.SHARED_CONFIG, ", ".join(stray),
+                                     claims.LOCAL_CONFIG))
 
 
 def cmd_whoami(args):
@@ -3242,6 +3342,13 @@ def main(argv=None):
                          "records the agreement as a note and does the copy")
     up.set_defaults(func=cmd_upgrade)
 
+    lz = sub.add_parser("localize", help="move this machine's settings out of "
+                                        "the file the group shares")
+    lz.add_argument("--agree", action="store_true",
+                    help="the Investigator has agreed to this change of the "
+                         "shared file; records it as a note and does the move")
+    lz.set_defaults(func=cmd_localize)
+
     j = sub.add_parser("join", help="register this investigator and check out "
                                     "their own branch")
     j.set_defaults(func=cmd_join)
@@ -3266,7 +3373,7 @@ def main(argv=None):
     # Every subcommand takes --problem, including the lab-wide ones, where
     # it says which clone to work in rather than which problem: a flag that
     # is right on six commands and unknown on four is a flag nobody trusts.
-    for q in (n, i, t, c, v, l, w, b, tr, j, m, rc, up):
+    for q in (n, i, t, c, v, l, w, b, tr, j, m, rc, up, lz):
         q.add_argument("--problem", help="the problem directory (default: found "
                                          "by walking up from here); for "
                                          "lab-wide commands, any directory in "

@@ -54,11 +54,15 @@ That is the whole job. The Director runs the scripts; you never have to.
 
 Someone sends you the repository's address. Clone it (`git clone <address>`,
 or ask the agent to), install the skill as above, start the agent in that
-folder, and say **open the lab**. The Director first tells you where the
-lab stands — that needs nothing from you. Then it asks whether you want to
-contribute or only read. If you contribute, it checks that git knows your
-name (your work is labelled with it), puts you on your own line of the
-record, and asks how you want to be talked to. You cite the others' work;
+folder, and say **open the lab** (or just give it the address and say that).
+The Director first tells you where the lab stands — that needs nothing from
+you. Then it asks whether you want to contribute or only read. If you
+contribute, it tells you what this lab counts as evidence and the rules the
+group works under, and asks you to agree to them; if you disagree with one,
+it writes that down for the next meeting rather than arguing or quietly
+changing it. Then it checks that git knows your name (your work is labelled
+with it), puts you on your own line of the record, looks at what tools your
+own machine has, and asks how you want to be talked to. You cite the others' work;
 you never edit it. What you record reaches the group at the next meeting.
 
 ## Every day after
@@ -136,6 +140,9 @@ Several people can share one lab, each with their own copy of it.
 - Everyone runs the same version of the tooling, because the lab keeps its
   own copy of it: the Director says when a newer one is installed and asks
   before bringing it in.
+- What your own machine can run — which models, how they start, what is
+  installed — stays on your machine and is never shared. What the group
+  agreed is shared. Nobody has to edit anybody else's setup.
 
 This prevents the two failures that end shared work: two people quietly
 believing different things until it matters, and a day spent untangling

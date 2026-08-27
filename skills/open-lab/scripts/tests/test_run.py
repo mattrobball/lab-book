@@ -37,12 +37,17 @@ class LabCase(unittest.TestCase):
         git(self.root, "init", "-q")
         git(self.root, "config", "user.name", "Test Lab")
         git(self.root, "config", "user.email", "lab@example.invalid")
-        (self.root / "lab.json").write_text(json.dumps({
+        # What this machine can run lives in the file that is never
+        # committed; the shared one holds what the group owns.
+        (self.root / "lab.json").write_text(json.dumps({}))
+        (self.root / "lab.local.json").write_text(json.dumps({
             "roles": {"technician": {"model": "worker-a",
                                      "command": "/bin/echo {prompt}"},
                       "manual": {"model": "worker-a"},
                       "nameless": {"command": "/bin/echo {prompt}"}},
             "tools": ["python3"]}))
+        (self.root / ".gitignore").write_text(
+            "__pycache__/\n*.pyc\nlab.local.json\n")
         self.problem = self.root / "problems" / "demo"
         (self.problem / "claims").mkdir(parents=True)
         (self.problem / "README.md").write_text("# demo\n")
@@ -71,6 +76,24 @@ class LabCase(unittest.TestCase):
                          % (r.stdout, r.stderr))
         self.assertTrue(r.stderr.startswith("Refused:"), r.stderr)
         return r.stderr
+
+    # -- this machine's settings -----------------------------------------
+    def local(self):
+        p = self.root / "lab.local.json"
+        return json.loads(p.read_text()) if p.exists() else {}
+
+    def write_local(self, cfg):
+        (self.root / "lab.local.json").write_text(json.dumps(cfg))
+
+    def set_role(self, name, **role):
+        cfg = self.local()
+        cfg.setdefault("roles", {})[name] = role
+        self.write_local(cfg)
+
+    def shared(self, **keys):
+        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg.update(keys)
+        (self.root / "lab.json").write_text(json.dumps(cfg))
 
     def claims_py(self, *args, **kw):
         r = self.script(CLAIMS, *args, **kw)
@@ -173,11 +196,8 @@ class TestDispatch(LabCase):
     def test_launching_captures_the_worker_output(self):
         """A worker that dies at its API exits quietly; the log is the only
         place that says so."""
-        (self.root / "lab.json").write_text(json.dumps({"roles": {"technician": {
-            "model": "worker-a",
-            "command": 'sh -c "echo alive; echo dead >&2"'}}}))
-        git(self.root, "add", "-A")
-        git(self.root, "commit", "-q", "-m", "a noisy worker")
+        self.set_role("technician", model="worker-a",
+                      command='sh -c "echo alive; echo dead >&2"')
         r = self.ok("new", "--brief", str(self.brief()))
         rid = r.stdout.split()[0]
         self.assertIn("worker.log", r.stdout)
@@ -188,8 +208,7 @@ class TestDispatch(LabCase):
         self.assertIn("dead", text)
 
     def test_a_silent_worker_is_named_as_such(self):
-        (self.root / "lab.json").write_text(json.dumps({"roles": {"technician": {
-            "model": "worker-a", "command": "/usr/bin/true"}}}))
+        self.set_role("technician", model="worker-a", command="/usr/bin/true")
         r = self.ok("new", "--brief", str(self.brief()))
         self.assertIn("printed nothing at all", r.stdout)
         rid = r.stdout.split()[0]
@@ -208,10 +227,10 @@ class TestDispatch(LabCase):
     def test_role_on_hold_refused_until_its_date(self):
         """F-007: a brief was written for a role with no quota; the fact lived
         in a note. A hold is a date, so it lifts itself."""
-        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg = self.local()
         cfg["roles"]["manual"].update(unavailable_until="2999-01-01",
                                       note="quota exhausted")
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.write_local(cfg)
         err = self.refused("new", "--brief", str(self.brief()), "--no-launch",
                            "--role", "manual")
         self.assertIn("quota exhausted", err)
@@ -219,21 +238,19 @@ class TestDispatch(LabCase):
                       self.ok("catchup", "2020-01-01").stdout)
         cfg["roles"]["manual"]["unavailable_until"] = "2000-01-01"
         cfg["roles"]["manual"]["note"] = "for: small jobs. not for: long reads"
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.write_local(cfg)
         _, r = self.dispatch()
         self.assertIn("not for: long reads", r.stdout)    # F-008: read at dispatch
         cfg["roles"]["manual"] = {"model": "worker-a", "available": False}
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.write_local(cfg)
         err = self.refused("new", "--brief", str(self.brief("b", "b2.md")),
                            "--no-launch", "--role", "manual")
         self.assertIn("goes stale", err)
 
     def sleeper_role(self, seconds, **limits):
-        cfg = json.loads((self.root / "lab.json").read_text())
-        cfg["roles"]["sleeper"] = dict(
-            {"model": "worker-z",
-             "command": "/bin/sh -c 'sleep %s' {prompt}" % seconds}, **limits)
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.set_role("sleeper", model="worker-z",
+                      command="/bin/sh -c 'sleep %s' {prompt}" % seconds,
+                      **limits)
 
     def test_breach_is_recorded_and_reported_never_enforced(self):
         """F-002/F-028: the wait once had its eyes closed. A worker over
@@ -641,9 +658,9 @@ class TestSpine(LabCase):
     def test_rotation_is_proposed_after_n_ingests_in_one_session(self):
         """F-020: nothing said when a session had run long. The notice is
         printed; rotation itself is the Investigator's call."""
-        cfg = json.loads((self.root / "lab.json").read_text())
+        cfg = self.local()
         cfg["machine"] = {"rotate_after_ingests": 2}
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.write_local(cfg)
         env = {"LAB_SESSION": "sess-1"}
         for i in range(2):
             rid, _ = self.dispatch(self.brief("q%d" % i, "b%d.md" % i))
@@ -925,11 +942,13 @@ class TestHousekeeping(LabCase):
     def test_dispatch_writes_and_commits_a_gitignore(self):
         """A byte-compiled file left under a run counts against the worker
         that never wrote it."""
+        (self.root / ".gitignore").unlink()
         self.assertFalse((self.root / ".gitignore").exists())
         self.dispatch()
         text = (self.root / ".gitignore").read_text()
         self.assertIn("__pycache__/", text)
         self.assertIn("*.pyc", text)
+        self.assertIn("lab.local.json", text)   # this machine's own settings
         self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
         # Cached sources stay on disk; the manifest and the query log travel.
         src = self.problem / "sources"
@@ -952,13 +971,11 @@ class TestHousekeeping(LabCase):
         self.assertEqual((self.root / ".gitignore").read_text(), text)
 
     def echoing_role(self, line, pattern=None):
-        cfg = json.loads((self.root / "lab.json").read_text())
-        cfg["roles"]["echoer"] = {"model": "worker-a",
-                                  "command": "/bin/sh -c 'echo \"%s\"' {prompt}"
-                                             % line}
+        role = {"model": "worker-a",
+                "command": "/bin/sh -c 'echo \"%s\"' {prompt}" % line}
         if pattern:
-            cfg["roles"]["echoer"]["usage_pattern"] = pattern
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+            role["usage_pattern"] = pattern
+        self.set_role("echoer", **role)
 
     def test_token_counts_are_read_however_the_worker_prints_them(self):
         """A count reported in one shape only is a count missing from every
@@ -983,6 +1000,79 @@ class TestHousekeeping(LabCase):
         self.assertEqual(e["usage"], {"cost": "5"})
 
 
+class TestConfigSplit(LabCase):
+    """What a machine can run is not a fact about the lab: committed launch
+    commands were one person's absolute paths, and the next person's
+    dispatches went to a binary that was not there."""
+
+    def test_this_machine_answers_over_the_group_role_by_role(self):
+        self.shared(roles={"manual": {"model": "shared-model",
+                                      "note": "the group's line"},
+                           "shared-only": {"model": "worker-s"}},
+                    tools=["shared-tool"])
+        self.write_local({"roles": {"manual": {"model": "worker-a",
+                                               "note": "this machine's line"}}})
+        rid, r = self.dispatch()
+        self.assertEqual(self.dispatch_json(rid)["model"], "worker-a")
+        self.assertIn("this machine's line", r.stdout)
+        # A role only the group names is still there to dispatch to.
+        rid2, _ = self.dispatch(self.brief("Other.", "b2.md"),
+                                extra=["--role", "shared-only"])
+        self.assertEqual(self.dispatch_json(rid2)["model"], "worker-s")
+
+    def test_a_lab_with_everything_in_the_shared_file_still_works(self):
+        (self.root / "lab.local.json").unlink()
+        self.shared(roles={"manual": {"model": "worker-a"}}, tools=["python3"],
+                    machine={"max_heavy_runs": 2})
+        rid, _ = self.dispatch()
+        self.assertEqual(self.dispatch_json(rid)["model"], "worker-a")
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("lab.json still holds", out)
+        self.assertIn("roles, tools, machine", out)
+        self.assertIn("run.py localize", out)
+
+    def test_localize_moves_the_machines_settings_and_ignores_the_file(self):
+        (self.root / "lab.local.json").unlink()
+        (self.root / ".gitignore").unlink()
+        self.shared(roles={"manual": {"model": "worker-a"}}, tools=["python3"],
+                    machine={"rotate_after_ingests": 3},
+                    investigators={}, commits={"max_mb": 50})
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "everything in one file")
+
+        err = self.refused("localize", cwd=self.root)
+        self.assertIn("--agree", err)
+        self.assertIn("roles", self.run_py("localize", cwd=self.root).stdout)
+
+        r = self.ok("localize", "--agree", cwd=self.root)
+        self.assertIn("Moved", r.stdout)
+        shared = json.loads((self.root / "lab.json").read_text())
+        self.assertNotIn("roles", shared)
+        self.assertNotIn("tools", shared)
+        self.assertNotIn("machine", shared)
+        self.assertEqual(shared["commits"], {"max_mb": 50})   # the group's, kept
+        local = self.local()
+        self.assertEqual(local["roles"]["manual"]["model"], "worker-a")
+        self.assertEqual(local["machine"], {"rotate_after_ingests": 3})
+        self.assertIn("lab.local.json", (self.root / ".gitignore").read_text())
+        self.assertIn("localize: machine, roles, tools out of lab.json",
+                      self.log())
+        # The agreement is on record, and the local file never is.
+        entry = (self.problem / "notebook" / "entries" /
+                 self.entries()[0]).read_text()
+        self.assertIn("agreed", entry)
+        self.assertEqual(git(self.root, "ls-files", "--", "lab.local.json")
+                         .stdout.strip(), "")
+        self.assertEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
+        # The lab runs exactly as before, and saying it twice changes nothing.
+        rid, _ = self.dispatch()
+        self.assertEqual(self.dispatch_json(rid)["model"], "worker-a")
+        again = self.ok("localize", "--agree", cwd=self.root)
+        self.assertIn("nothing to move", again.stdout)
+        self.assertNotIn("lab.json still holds",
+                         self.ok("catchup", "2020-01-01").stdout)
+
+
 class TestUpgrade(LabCase):
     """A lab holds its own copies of the scripts on purpose. What that costs
     is knowing when the installed kit has moved on."""
@@ -1000,9 +1090,7 @@ class TestUpgrade(LabCase):
         self.stamp("1.0.0")
 
     def stamp(self, version):
-        cfg = json.loads((self.root / "lab.json").read_text())
-        cfg["kit_version"] = version
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.shared(kit_version=version)
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "the lab's own copies")
 
@@ -1078,9 +1166,7 @@ class TestLargeOutputs(LabCase):
     pushed at all."""
 
     def cap(self, mb):
-        cfg = json.loads((self.root / "lab.json").read_text())
-        cfg["commits"] = {"max_mb": mb}
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+        self.shared(commits={"max_mb": mb})
         git(self.root, "add", "lab.json")
         git(self.root, "commit", "-q", "-m", "cap on what a commit may carry")
 
@@ -1145,12 +1231,13 @@ class TestTranscripts(LabCase):
         self.store = Path(tempfile.mkdtemp(prefix="labsessions-"))
         self.addCleanup(shutil.rmtree, self.store, ignore_errors=True)
 
-    def configure(self, transcript=None, **lab):
-        cfg = json.loads((self.root / "lab.json").read_text())
+    def configure(self, transcript=None, **shared):
         if transcript is not None:
+            cfg = self.local()
             cfg["roles"]["manual"]["transcript"] = transcript
-        cfg.update(lab)
-        (self.root / "lab.json").write_text(json.dumps(cfg))
+            self.write_local(cfg)
+        if shared:
+            self.shared(**shared)
 
     def session(self, path, cwd=None, body="thought\n"):
         """A session file in the shape these stores write: JSON per line,

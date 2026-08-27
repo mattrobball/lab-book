@@ -266,6 +266,14 @@ a source (the paper or book, or "Investigator, intake").
   `run.py new --duplicates <run>`. Catchup names the pair until the original
   is closed, so two people doing one job is seen the same day.
   *Source:* `references/runs.md`, "Joining a lab".
+- **Shared and local settings** — `lab.json` is the group's, committed and
+  changed only with the Investigator's agreement; `lab.local.json` is this
+  person's machine — its workers, tools and limits — never committed and
+  theirs to change. The scripts read the two as one, the local answers
+  winning.
+  *Example:* the same role name launches a different command on each
+  person's laptop, and neither has to edit the other's.
+  *Source:* `references/runs.md`, "Starting a lab".
 - **Kit version** — which release of the kit this lab's copies of the
   scripts came from, in `lab.json` as `kit_version`. Catchup says when the
   installed kit is newer; `run.py upgrade` shows the diff and, on the

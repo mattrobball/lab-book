@@ -4,7 +4,7 @@ description: >-
   Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
 ---
 
 # Lab book
@@ -26,6 +26,16 @@ IDs except as format examples, no lab, problem, vendor or model names. The
 reference run is the one worked example this kit cites. Facts about a
 particular lab belong in that lab's own `AGENTS.md`, notes, and `lab.json`.
 
+## Was I given an address?
+
+Not in a lab, but the Investigator gave a git address — or this folder is
+empty and an address is in their message: clone it and carry on as an
+existing lab. `git clone <address> .` in an empty folder; if the folder is
+not empty, clone into a named subfolder instead and say which, rather than
+scattering somebody else's lab over their files. Then read "Am I in a lab
+already?" below and follow it: the first thing the Investigator sees is
+where the lab stands, not a setup interview for a lab that already exists.
+
 ## Am I in a lab already?
 
 If the current repository has an `AGENTS.md` naming the Director and a
@@ -45,11 +55,22 @@ Then, is this person new here? `run.py whoami` says. If the lab has
 investigators registered and this git user is not one of them, they have
 cloned a lab others started. Having shown them where it stands, ask whether
 they want to contribute or only read. A reader needs nothing more. A
-contributor is joined: check git's `user.name` is their real name (their tag
-is made from it), run `run.py join` — it registers them and puts them on
-their own branch — ask only the sixth intake question (how they want to be
-talked to), add their `## This Investigator` block to `AGENTS.md`, commit it
-on their branch, and push. A person who writes without joining writes into
+contributor is joined, in this order. Read them what this lab counts as
+evidence — the problem `README.md`'s "What counts as evidence" — with its
+constraints and the `policy` lines in `lab.json`, and the charter's "This
+lab" section if there is one, and ask them to say they will work under them:
+two people holding two standards of proof produce two kinds of result and
+find out at the paper. If they disagree, do not talk them round and do not
+change the rule on the spot — file the disagreement as a `run.py note` and
+put it on the next meeting's agenda. Then check git's `user.name` is their
+real name (their tag is made from it) and run `run.py join`, which registers
+them and puts them on their own branch. Then discover the environment on
+*this* machine — their models, launch commands and tools — and write
+`lab.local.json` from what they confirm; it is never committed, and the
+launch commands in someone else's copy are paths on someone else's disk.
+Then ask the sixth intake question (how they want to be talked to), add
+their `## This Investigator` block to `AGENTS.md`, commit it on their
+branch, and push. A person who writes without joining writes into
 nobody's namespace, and the scripts refuse until they join. While a worker is running, commit every edit you make, naming
 its path: an uncommitted file of yours is counted against that worker at
 ingest, and the refusal names the worker.
@@ -85,11 +106,13 @@ Then scaffold the lab repository:
    - `scripts/claims.py` → `claims.py`
    - `scripts/run.py` → `run.py`
    - `assets/templates/` → `templates/`
-3. Write `lab.json` from the discovery results — the models, launch commands,
-   and confirmed tools, plus `kit_version` from this SKILL.md's
-   `metadata.version`, so the lab knows which kit its copies came from. Its
-   shape is in `references/runs.md`; the skill ships no models or commands of
-   its own.
+3. Write the two configuration files, whose shapes are in
+   `references/runs.md`; the skill ships no models or commands of its own.
+   `lab.local.json` takes the discovery results — this machine's models,
+   launch commands, tools and limits — and is never committed. `lab.json`
+   takes what the group owns: `kit_version` from this SKILL.md's
+   `metadata.version`, the caps, and `policy`, the standing rules in plain
+   sentences that anyone joining later is read.
 4. `run.py join`. It registers this Investigator in `lab.json` from git's
    `user.name`, creates their branch `lab/<tag>`, writes a `.gitignore` for
    byte-compiled files, and commits — in a fresh lab that is the first

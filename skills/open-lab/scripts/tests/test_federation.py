@@ -152,6 +152,14 @@ class TestJoin(FederationCase):
     def test_join_registers_creates_the_branch_and_is_idempotent(self):
         r = self.join(self.alice)
         self.assertIn("Joined as alice", r.stdout)
+        # A joiner is left the file their own machine answers for, and told
+        # it is empty rather than being given somebody else's launch paths.
+        self.assertIn("lab.local.json", r.stdout)
+        local = json.loads((self.alice / "lab.local.json").read_text())
+        self.assertEqual(local["roles"], {})
+        self.assertIn("no roles in it yet", r.stdout)
+        self.assertEqual(git(self.alice, "ls-files", "--", "lab.local.json")
+                         .stdout.strip(), "")
         self.assertEqual(self.branch(self.alice), "lab/alice")
         reg = self.lab_json(self.alice)["investigators"]
         self.assertEqual(reg["alice"]["name"], "Alice")

@@ -141,17 +141,57 @@ def lab_root(start=None):
     return Path(top)
 
 
-def lab_config(root):
-    """lab.json as a dict, {} when the lab has none."""
-    p = Path(root) / "lab.json"
-    if not p.exists():
+SHARED_CONFIG = "lab.json"
+LOCAL_CONFIG = "lab.local.json"
+# What belongs to one person's machine rather than to the group: which
+# workers exist here, which subject tools are installed, what this machine
+# can run at once.
+LOCAL_KEYS = ("roles", "tools", "machine")
+
+
+def read_config(path):
+    """One configuration file as a dict, {} when it is not there."""
+    path = Path(path)
+    if not path.exists():
         return {}
     try:
-        return json.loads(p.read_text())
+        return json.loads(path.read_text())
     except json.JSONDecodeError as e:
-        refuse("%s is not valid JSON (%s). Fix that file — it holds the models "
-               "and launch commands for this machine, and the lab's "
-               "investigators." % (p, e))
+        refuse("%s is not valid JSON (%s). Fix that file — the scripts read "
+               "it for the lab's workers and settings." % (path, e))
+
+
+def write_config(path, cfg):
+    Path(path).write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
+
+
+def shared_config(root):
+    """What the group owns and commits: who the investigators are, which kit
+    the lab is on, the caps everyone is held to, the policy lines."""
+    return read_config(Path(root) / SHARED_CONFIG)
+
+
+def local_config(root):
+    """What this person's machine answers for: its workers and how they are
+    launched, the tools installed here, what it can run at once. Never
+    committed."""
+    return read_config(Path(root) / LOCAL_CONFIG)
+
+
+def lab_config(root):
+    """The configuration as every reader sees it: the group's file with this
+    machine's own answers laid over it, key by key, and role by role within
+    `roles`. The failure it prevents: one lab's launch commands were
+    absolute paths on the founder's machine, committed for everyone, and the
+    second person's Director dispatched to a binary that was not there."""
+    shared, local = shared_config(root), local_config(root)
+    merged = dict(shared)
+    merged.update(local)
+    roles = dict(shared.get("roles") or {})
+    roles.update(local.get("roles") or {})
+    if roles:
+        merged["roles"] = roles
+    return merged
 
 
 # ------------------------------------------------- investigators, branches
