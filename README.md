@@ -11,9 +11,10 @@ it is a claim with a status and evidence on record.
 ## What you actually do
 
 - Say **open the lab**. The first time, you answer a few questions about the
-  problem and confirm what the Director found on your machine and in the
-  literature. Every time after, the Director tells you what changed since you
-  were last there and proposes the next move.
+  problem and about how you want to be talked to, and confirm what the
+  Director found on your machine, in the literature, and in public data.
+  Every time after, the Director tells you what changed since you were last
+  there and proposes the next move.
 - Read **`STATUS.md`** for a problem: one page, plain words, what the lab
   currently believes and what it has ruled out.
 - Say what matters: which question next, what counts as evidence, when to
@@ -28,8 +29,9 @@ That is the whole job. The Director runs the scripts; you never have to.
    instance: Claude Code (in a terminal, as a desktop app, or on the web at
    claude.ai/code), the Codex CLI, ChatGPT's work mode with a connected
    folder, Cursor, Copilot, Gemini CLI — and others; the list grows. Follow
-   the tool's own install instructions. What it needs: your lab folder, `python3`, and `git`. Make an empty
-   folder for the lab and start the agent in it.
+   the tool's own install instructions. What it needs: your lab folder,
+   `python3`, and `git`. Make an empty folder for the lab and start the
+   agent in it.
 2. **Install this skill.** Inside the agent, say:
 
        install the skill from mattrobball/lab-book
@@ -39,16 +41,20 @@ That is the whole job. The Director runs the scripts; you never have to.
    end.)
 3. **Say "open the lab".** The Director asks its questions one at a time —
    what the problem is, what would convince you a result is true, what is
-   already known, what the limits are. Answer in plain sentences. It then
-   looks for the tools on your machine, the papers, and the public data on
-   your exact question, and shows you each list to confirm or strike. Then
-   it sets up the folder and proposes the first task.
+   already known, what the limits are, and how you want to be talked to.
+   Answer in plain sentences. It then looks for the tools on your machine,
+   the papers, and the public data on your exact question, and shows you
+   each list to confirm or strike. Then it sets up the folder, puts you on
+   your own line of the record (even alone — a colleague can join later
+   without anything changing), and proposes the first task.
 4. **Watch the first task go round.** The Director writes a **brief** (the
    task, in full), sends a **worker** to do it, and when the worker returns
    the result is checked by machine, filed, and summarised for you in a few
    sentences. Anything the worker claims appears as a numbered **claim**
-   (`C-001`, `C-002`, …) marked *proposed* — not yet believed. A second
-   worker, on a different model, is sent to attack it before it is believed.
+   (`C-ann-001`, `C-ann-002`, … — the middle part is your name) marked
+   *proposed*, not yet believed. A second worker, on a different model, is
+   sent to attack it before it is believed. The worker's whole transcript is
+   kept with the run, so anyone can later see how the result was reached.
 
 ## Joining a lab that already exists
 
@@ -81,7 +87,8 @@ file that owns the rule.
 - **Brief** — a task written for a worker: the goal, what it may rely on,
   what counts as success. *"Prove or refute: the largest cap in dimension 4
   has 20 points."*
-- **Run** — one worker sent on one brief, numbered `R-001`, `R-002`, …
+- **Run** — one worker sent on one brief, numbered `R-ann-001`, `R-ann-002`,
+  … with your name in the middle, so two people's runs never collide.
 - **Packet** — what the worker brings back: a verdict (PASS, FAIL, or
   UNDECIDED), what it did, what it does *not* claim, and how to check it.
 - **Ingest** — the gate: the packet is checked, its evidence is re-run by
@@ -93,7 +100,11 @@ file that owns the rule.
   re-runs the exact command and checks the exact output, or a different
   worker checks the argument by hand and the record says who and what.
 - **Catchup** — the report at the start of every session: runs, verdicts,
-  claim changes, and anything that needs a decision.
+  claim changes, what the others recorded, and anything that needs a
+  decision.
+- **Meeting** — how a group agrees: everyone on a call, one at the keyboard,
+  the Director reading out each disagreement, the room deciding, the
+  decision written down before the next item.
 
 ## When it refuses
 
@@ -108,9 +119,11 @@ them, and neither should you; each refusal tells you what to do.
    ingested, or closed with a reason.
 3. **No task goes out without a named model.** The Director must say which
    model does the work; a default is fine, silence is not.
-4. **The scripts and the lab's settings change only with your explicit
-   agreement.** The Director will ask you before changing a rule, record your
-   answer, and run one small test task afterwards.
+4. **The scripts and the group's shared settings change only with your
+   explicit agreement.** The Director will ask you before changing a rule,
+   record your answer, and run one small test task afterwards. (Your own
+   machine's settings — which models you can run, how they start — are yours
+   to change freely.)
 
 Two more things come to you as decisions, never taken alone: a worker that
 has gone over its time or memory budget (kill it, or let it run), and a
@@ -121,10 +134,9 @@ on).
 
 Several people can share one lab, each with their own copy of it.
 
-- Everyone starts by saying **join the lab**, once, on their own machine.
-  From then on their work is written to their own line of the record and
-  numbered with their own initials, so two people can never label two
-  different things the same way.
+- Everyone has their own line of the record from the day they open or join
+  the lab: their runs, claims and notes carry their name, so two people can
+  never label two different things the same way.
 - Every morning the Director tells you what the others recorded since you
   last looked — their tasks, their results, their claims — without mixing
   their record into yours. An experiment belongs to whoever ran it: you cite
@@ -173,6 +185,13 @@ it should not exist.
 - **One branch and one set of numbers per person** — prevents two people
   labelling different results the same way, and a day of untangling whose
   copy of a file is right.
+- **The worker's transcript kept with its run** — prevents a result whose
+  reasoning lives in a session store on one machine until it is pruned.
+- **Nothing over 50 MB enters the history; cached papers and data stay on
+  disk** — prevents a record that can no longer be pushed anywhere, and a
+  repository full of files that were never ours to redistribute.
+- **One version of the tooling per lab, upgraded on your word** — prevents
+  two people's Directors following different rules over one record.
 
 ## Install, in full
 
@@ -202,9 +221,11 @@ restart; if "open the lab" is not recognised, restart the tool.
 
 ## Status
 
-Complete and in daily use. The charter, the two
-references, the templates, the glossary, and both scripts with their test
-suite (`python3 -m unittest` from `skills/open-lab/scripts/tests/`).
+Version 1.4.0. The charter, the two references, the templates, the
+glossary, and both scripts with their test suite (125 tests:
+`python3 -m unittest` from `skills/open-lab/scripts/tests/`). Exercised end
+to end by a scripted cold start and a simulated two-person meeting; the
+first real group lab is next.
 
 ## Contributing
 
