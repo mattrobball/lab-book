@@ -26,10 +26,10 @@ IDs except as format examples, no lab, problem, vendor or model names. The
 reference run is the one worked example this kit cites. Facts about a
 particular lab belong in that lab's own `AGENTS.md`, notes, and `lab.json`.
 
-## Was I given an address?
+## Was I told to join a lab at an address?
 
-Not in a lab, but the Investigator gave a git address — or this folder is
-empty and an address is in their message: clone it and carry on as an
+"join the lab at <address>", "open the lab at <address>", or any message
+that is not in a lab and carries a git address: clone it and carry on as an
 existing lab. `git clone <address> .` in an empty folder; if the folder is
 not empty, clone into a named subfolder instead and say which, rather than
 scattering somebody else's lab over their files. Then read "Am I in a lab

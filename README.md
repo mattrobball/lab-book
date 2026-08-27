@@ -10,7 +10,8 @@ it is a claim with a status and evidence on record.
 
 ## What you actually do
 
-- Say **open the lab**. The first time, you answer a few questions about the
+- Say **open the lab** — or **join the lab at `<address>`** for a lab a
+  colleague started. The first time, you answer a few questions about the
   problem and about how you want to be talked to, and confirm what the
   Director found on your machine, in the literature, and in public data.
   Every time after, the Director tells you what changed since you were last
@@ -58,11 +59,13 @@ That is the whole job. The Director runs the scripts; you never have to.
 
 ## Joining a lab that already exists
 
-Someone sends you the repository's address. Clone it (`git clone <address>`,
-or ask the agent to), install the skill as above, start the agent in that
-folder, and say **open the lab** (or just give it the address and say that).
-The Director first tells you where the lab stands — that needs nothing from
-you. Then it asks whether you want to contribute or only read. If you
+Someone sends you the repository's address. Install the skill as above,
+start the agent in an empty folder, and say:
+
+    join the lab at <address>
+
+The Director clones the lab into that folder and first tells you where it
+stands — that needs nothing from you. Then it asks whether you want to contribute or only read. If you
 contribute, it tells you what this lab counts as evidence and the rules the
 group works under, and asks you to agree to them; if you disagree with one,
 it writes that down for the next meeting rather than arguing or quietly
@@ -134,9 +137,10 @@ on).
 
 Several people can share one lab, each with their own copy of it.
 
-- Everyone has their own line of the record from the day they open or join
-  the lab: their runs, claims and notes carry their name, so two people can
-  never label two different things the same way.
+- A colleague joins by saying **join the lab at `<address>`**. Everyone has
+  their own line of the record from the day they open or join: their runs,
+  claims and notes carry their name, so two people can never label two
+  different things the same way.
 - Every morning the Director tells you what the others recorded since you
   last looked — their tasks, their results, their claims — without mixing
   their record into yours. An experiment belongs to whoever ran it: you cite
