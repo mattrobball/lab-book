@@ -112,7 +112,10 @@ boards update: catchup flags any baseline line fetched more than
 ## Joining a lab
 
 Every investigator runs `run.py join` once per clone, before their first
-write; in a fresh lab it makes the first commit itself. It makes a **tag** from git's `user.name` (lowercase, letters and
+write; in a fresh lab it makes the first commit itself. For a person joining
+a lab others started, the Director runs it on their first "open the lab",
+asks only the sixth intake question, and files their `## This Investigator`
+block on their branch (`SKILL.md`, "Am I in a lab already?"). It makes a **tag** from git's `user.name` (lowercase, letters and
 digits, at most twelve), registers the person in `lab.json` under
 `investigators`, creates the branch `lab/<tag>`, and checks it out. Run it
 again and it only checks the branch out; it refuses when the tag is already

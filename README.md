@@ -23,14 +23,13 @@ That is the whole job. The Director runs the scripts; you never have to.
 
 ## Your first hour
 
-1. **Install a coding agent.** Any of these works; pick the one whose vendor
-   you have an account with.
-   - Claude Code: `npm install -g @anthropic-ai/claude-code`, then type
-     `claude` in a terminal.
-   - Codex: `npm install -g @openai/codex`, then `codex`.
-
-   Open a terminal, make an empty folder for the lab, `cd` into it, and start
-   the agent there.
+1. **Get a coding agent.** Any tool in which a language model can open a
+   folder, read and write files there, and run commands will do. For
+   instance: Claude Code (in a terminal, as a desktop app, or on the web at
+   claude.ai/code), the Codex CLI, ChatGPT's work mode with a connected
+   folder, Cursor, Copilot, Gemini CLI — and others; the list grows. Follow
+   the tool's own install instructions. What it needs: your lab folder, `python3`, and `git`. Make an empty
+   folder for the lab and start the agent in it.
 2. **Install this skill.** Inside the agent, say:
 
        install the skill from mattrobball/lab-book
@@ -50,6 +49,16 @@ That is the whole job. The Director runs the scripts; you never have to.
    sentences. Anything the worker claims appears as a numbered **claim**
    (`C-001`, `C-002`, …) marked *proposed* — not yet believed. A second
    worker, on a different model, is sent to attack it before it is believed.
+
+## Joining a lab that already exists
+
+Someone sends you the repository's address. Clone it (`git clone <address>`,
+or ask the agent to), install the skill as above, start the agent in that
+folder, and say **open the lab**. The Director sees you are new here, checks
+that git knows your name (your work is labelled with it), puts you on your
+own line of the record, asks how you want to be talked to, and then tells
+you where the lab stands. You cite the others' work; you never edit it. What
+you record reaches the group at the next meeting.
 
 ## Every day after
 
@@ -164,7 +173,11 @@ Claude Code can also install it as a plugin:
     /plugin marketplace add mattrobball/lab-book
     /plugin install lab-book@lab-book
 
-By hand, copy the `skills/open-lab/` directory into your agent's skill path:
+If your tool has no skill folder, or you would rather not find it: copy
+`skills/open-lab/` into the lab folder itself and say "read
+skills/open-lab/SKILL.md, then open the lab". That works anywhere.
+
+Skill folders differ by tool and move over time; as of this writing:
 
 | CLI | Path |
 |---|---|
@@ -176,8 +189,8 @@ By hand, copy the `skills/open-lab/` directory into your agent's skill path:
 | pi | `~/.pi/agent/skills/` |
 | shared, where supported | `~/.agents/skills/` |
 
-New skills load without a restart in Claude Code, Copilot (`/skills reload`),
-and pi (`/reload`); Codex and Gemini sessions need a restart to see them.
+Some tools pick up a new skill at once, others after a reload command or a
+restart; if "open the lab" is not recognised, restart the tool.
 
 ## Status
 
