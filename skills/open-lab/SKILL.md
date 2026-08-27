@@ -34,21 +34,23 @@ Follow that charter — it is the binding document — and open
 `references/claims.md` or `references/runs.md` from this skill when you reach
 the step each one covers.
 
-First, is this person new here? Run `run.py whoami`. If the lab has
-investigators registered and this git user is not one of them, they are
-joining a lab someone else started: check git's `user.name` is their real
-name (the tag is made from it), run `run.py join` — it registers them and
-puts them on their own branch — ask only the sixth intake question (how they
-want to be talked to), add their `## This Investigator` block to
-`AGENTS.md`, commit it on their branch, and push. Then continue below. A
-person who skips this writes into nobody's namespace, and the scripts refuse
-until they join.
-
 Opening an existing lab starts with catchup: run `run.py catchup` for the runs,
 verdicts, and claim changes since the last session, read `STATUS.md`, and tell
 the Investigator where things stand in plain sentences before proposing the next
 move. This prevents the day starting from memory of a session that is not in
-this context. While a worker is running, commit every edit you make, naming
+this context. Catchup is read-only and works on any branch, so it comes
+first even for someone who has only just cloned the lab.
+
+Then, is this person new here? `run.py whoami` says. If the lab has
+investigators registered and this git user is not one of them, they have
+cloned a lab others started. Having shown them where it stands, ask whether
+they want to contribute or only read. A reader needs nothing more. A
+contributor is joined: check git's `user.name` is their real name (their tag
+is made from it), run `run.py join` — it registers them and puts them on
+their own branch — ask only the sixth intake question (how they want to be
+talked to), add their `## This Investigator` block to `AGENTS.md`, commit it
+on their branch, and push. A person who writes without joining writes into
+nobody's namespace, and the scripts refuse until they join. While a worker is running, commit every edit you make, naming
 its path: an uncommitted file of yours is counted against that worker at
 ingest, and the refusal names the worker.
 

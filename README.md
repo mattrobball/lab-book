@@ -54,11 +54,12 @@ That is the whole job. The Director runs the scripts; you never have to.
 
 Someone sends you the repository's address. Clone it (`git clone <address>`,
 or ask the agent to), install the skill as above, start the agent in that
-folder, and say **open the lab**. The Director sees you are new here, checks
-that git knows your name (your work is labelled with it), puts you on your
-own line of the record, asks how you want to be talked to, and then tells
-you where the lab stands. You cite the others' work; you never edit it. What
-you record reaches the group at the next meeting.
+folder, and say **open the lab**. The Director first tells you where the
+lab stands — that needs nothing from you. Then it asks whether you want to
+contribute or only read. If you contribute, it checks that git knows your
+name (your work is labelled with it), puts you on your own line of the
+record, and asks how you want to be talked to. You cite the others' work;
+you never edit it. What you record reaches the group at the next meeting.
 
 ## Every day after
 
