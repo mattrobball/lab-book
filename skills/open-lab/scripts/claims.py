@@ -359,6 +359,73 @@ def list_branch_dir(root, ref, relpath):
             for line in r.stdout.splitlines() if line.strip()]
 
 
+# ---------------------------------------------------------------- the record
+
+# The record is what is committed. The working tree is scratch: a git
+# checkout, stash or reset can roll a file on disk back to an older state,
+# and on 2026-09-02 that rolled R-038's dispatch.json back to "open" and let
+# it be ingested twice. So every question about state — is this run open,
+# was it ingested, what is this claim's status — is answered from HEAD, and
+# the copy on disk is consulted only for a file git has never seen. Cached
+# per path; both commit() functions clear the cache.
+_COMMITTED = {}
+_ROOTS = {}
+# Files this process has written and not yet committed: read from disk, or
+# a view regenerated between the append and the commit would lag one event.
+_OWN_WRITES = set()
+
+
+def own_write(path):
+    _OWN_WRITES.add(str(Path(path).resolve()))
+
+
+def cached_root(problem):
+    """The repository root, or None outside any repository — then the
+    working copy is all there is to read."""
+    key = str(Path(problem).resolve())
+    if key not in _ROOTS:
+        r = git(problem, "rev-parse", "--show-toplevel")
+        _ROOTS[key] = Path(r.stdout.strip()) if r.returncode == 0 else None
+    return _ROOTS[key]
+
+
+def forget_committed():
+    _COMMITTED.clear()
+    _OWN_WRITES.clear()
+
+
+def committed_text(problem, path):
+    """The text of `path` as HEAD holds it, else as the working tree holds
+    it, else None."""
+    path = Path(path)
+    root = cached_root(problem)
+    rel = None
+    if root is not None and str(path.resolve()) not in _OWN_WRITES:
+        try:
+            rel = str(path.resolve().relative_to(root.resolve()))
+        except ValueError:
+            pass
+    if rel is not None:
+        if rel not in _COMMITTED:
+            _COMMITTED[rel] = read_branch_file(root, "HEAD", rel)
+        if _COMMITTED[rel] is not None:
+            return _COMMITTED[rel]
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
+def committed_json(problem, path):
+    text = committed_text(problem, path)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
 # ---------------------------------------------------------------- ID names
 
 def id_parts(ident):
@@ -447,12 +514,22 @@ def stream_tag(path):
 
 
 def stream_events(problem):
-    """Every event in every ledger on disk, each marked with the stream it
-    came from."""
+    """Every event in every ledger as HEAD holds it (the working copy only
+    for a ledger never committed), each marked with the stream it came
+    from."""
     out = []
-    for p in ledger_paths(problem):
+    root = cached_root(problem)
+    names = set(p.name for p in ledger_paths(problem))
+    if root is not None:
+        base = str(Path(problem).resolve().relative_to(root.resolve()))
+        base = "" if base == "." else base + "/"
+        names |= set(n for n in list_branch_dir(root, "HEAD", base + "claims")
+                     if n.startswith("ledger") and n.endswith(".jsonl"))
+    for name in sorted(names):
+        p = Path(problem) / "claims" / name
+        text = committed_text(problem, p) or ""
         tag = stream_tag(p)
-        for line in p.read_text().splitlines():
+        for line in text.splitlines():
             if line.strip():
                 out.append((json.loads(line), tag))
     return out
@@ -512,7 +589,11 @@ def fold(events):
                 continue
             if rec["event"] == "affirm":
                 # A decision that changed nothing still happened, and the
-                # ledger is where it is on record.
+                # ledger is where it is on record. An affirmation may repoint
+                # what the claim rests on (after a supersession) and nothing
+                # else.
+                if rec.get("rests_on") is not None:
+                    c["rests_on"] = rec["rests_on"]
                 c["history"].append(rec)
                 continue
             c.update(status=rec["to"], hash=rec["hash"],
@@ -548,6 +629,7 @@ def load(problem, include_remote=False, root=None):
 def append(problem, rec, tag=None):
     path = ledger_path(problem, tag)
     path.parent.mkdir(parents=True, exist_ok=True)
+    own_write(path)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     with os.fdopen(fd, "a") as fh:
         fh.write(json.dumps(rec, sort_keys=True) + "\n")
@@ -654,6 +736,7 @@ def commit(problem, message):
     root = git_root(problem)
     paths = [str((problem / "claims").relative_to(root)),
              str((problem / "CLAIMS.md").relative_to(root))]
+    forget_committed()
     git(root, "add", "--", *paths)
     r = git(root, "commit", "-m", message, "--", *paths)
     if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr):
@@ -713,6 +796,74 @@ def dependents(claims, cid):
                 out.append(other)
                 frontier.append(other)
     return sorted(out)
+
+
+def cascade_plan(claims, cid, target, by, actor, when=None):
+    """What a step down of `cid` does to the claims standing on it. Until
+    2026-09-10 nothing happened: C-227 stayed verified for a week on top of
+    C-215 after C-215 fell to conditional, and catchup only warned.
+
+    Returns the ledger events to append, in order:
+    - if `cid` is superseded by a claim that is itself verified, every direct
+      dependent is repointed at the replacement (an affirm carrying rests_on)
+      and keeps its status;
+    - otherwise every verified claim resting on `cid`, directly or through
+      other claims, goes to conditional on `cid` being verified again.
+    Claims that are not verified are left alone: they are already marked as
+    unsettled, and catchup names them."""
+    when = when or now()
+    events = []
+    if target == "superseded" and by and by in claims and \
+            claims[by]["status"] == "verified":
+        for other in sorted(claims, key=id_key):
+            rests = claims[other].get("rests_on") or []
+            if cid in rests:
+                new_rests = [by if r == cid else r for r in rests]
+                events.append({"event": "affirm", "id": other, "ts": when,
+                               "actor": actor, "status": claims[other]["status"],
+                               "hash": claims[other]["hash"],
+                               "rests_on": new_rests,
+                               "reason": "%s now rests on %s, which supersedes "
+                                         "%s and is verified." % (other, by, cid)})
+        return events
+    for other in dependents(claims, cid):
+        c = claims[other]
+        if c["status"] != "verified":
+            continue
+        conditions = c["conditions"].strip()
+        if target == "superseded" and by:
+            clause = "%s, which supersedes %s, is verified" % (by, cid)
+        else:
+            clause = "%s is verified again" % cid
+        conditions = (conditions + "; " + clause) if conditions else clause
+        events.append({"event": "set", "id": other, "ts": when, "actor": actor,
+                       "from": "verified", "to": "conditional", "evidence": None,
+                       "by": None, "statement": c["statement"],
+                       "conditions": conditions,
+                       "reason": "%s rests, directly or through other claims, "
+                                 "on %s, which became %s on %s. Verified "
+                                 "cannot stand on %s." % (other, cid, target,
+                                                          when[:10], target),
+                       "hash": text_hash(c["statement"], conditions)})
+    return events
+
+
+def cascade(problem, claims, cid, target, by, actor, tag=None):
+    """Append, regenerate and commit each event cascade_plan returns, one
+    commit per claim so the log reads like every other status change."""
+    done = []
+    for rec in cascade_plan(claims, cid, target, by, actor):
+        append(problem, rec, tag)
+        regenerate(problem)
+        if rec["event"] == "set":
+            commit(problem, "%s %s -> %s (rests on %s, now %s)"
+                   % (rec["id"], rec["from"], rec["to"], cid, target))
+            done.append("%s verified -> conditional" % rec["id"])
+        else:
+            commit(problem, "%s affirmed (%s): rests on %s instead of %s"
+                   % (rec["id"], rec["status"], by, cid))
+            done.append("%s now rests on %s" % (rec["id"], by))
+    return done
 
 
 BROKEN = ("UNINGESTABLE", "HARNESS-FAILURE")
@@ -993,7 +1144,9 @@ def cmd_set(args):
     tail = " (%s)" % evidence if evidence else (" (by %s)" % args.by if args.by else "")
     commit(problem, "%s %s -> %s%s" % (cid, old, target, tail))
     print("%s %s -> %s" % (cid, old, target))
-    if target in ("refuted", "superseded", "proposed"):
+    if target != "verified":
+        for line in cascade(problem, claims, cid, target, args.by, actor, tag):
+            print("  " + line)
         hit = dependents(claims, cid)
         if hit:
             print("Standing on %s, review each: %s" % (cid, ", ".join(hit)))

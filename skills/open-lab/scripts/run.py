@@ -103,6 +103,8 @@ at ingest rather than filed. Write nothing outside this repository either —
 no /tmp, no home directory; scratch files belong in your packet directory.
 
 - Run no `git` commands of any kind. The lab records itself.
+- Never inspect, print, copy, or write credentials, authentication files,
+  or environment-variable values. None of them are part of any task.
 - Never invent a claim ID. Copy into `claims_used` exactly the IDs the brief
   pastes, and nothing else. New claims go in `claims_proposed` as plain
   sentences; the lab allocates their IDs when this run is ingested.
@@ -283,7 +285,7 @@ def find_run_anywhere(root, problem, rid):
 def run_record_anywhere(root, problem, rid):
     """A run's dispatch.json wherever it can be read from, for the questions
     asked about somebody else's run — is it still open, who owns it."""
-    local = load_json(run_dir(problem, rid) / "dispatch.json")
+    local = claims.committed_json(problem, run_dir(problem, rid) / "dispatch.json")
     if local:
         return local
     base = problem_rel(root, problem)
@@ -523,6 +525,7 @@ def commit(root, paths, message):
              git(root, "ls-files", "--error-unmatch", "--", p).returncode == 0)]
     if not paths:
         return
+    claims.forget_committed()
     git(root, "add", "--", *paths)
     r = git(root, "commit", "-m", message, "--", *paths)
     if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr):
@@ -591,7 +594,7 @@ def all_runs(problem):
 def run_owner(problem, rid):
     """The investigator a run belongs to: what the dispatch recorded, else
     what its ID says. "" for a run from before anyone joined."""
-    d = load_json(run_dir(problem, rid) / "dispatch.json") or {}
+    d = claims.committed_json(problem, run_dir(problem, rid) / "dispatch.json") or {}
     return d.get("investigator") or id_tag(rid) or ""
 
 
@@ -640,11 +643,13 @@ def push_own_branch(root, tag):
 
 
 def ingest_record(problem, rid):
-    return load_json(run_dir(problem, rid) / "ingest.json")
+    """As committed — see claims.committed_json for why not the disk copy."""
+    return claims.committed_json(problem, run_dir(problem, rid) / "ingest.json")
 
 
 def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    claims.own_write(path)      # read back from disk until it is committed
 
 
 # ---------------------------------------------------------------- notebook
@@ -1233,11 +1238,38 @@ def cmd_new(args):
     launch_and_watch(argv, rundir, log, execution, limits, role, rid, rundir_rel)
     overdue_report(problem, skip={rid})
 
+# Names a worker may inherit from the Director's environment. Everything
+# else — API keys, session tokens, anything a provider CLI or the Director's
+# own harness exported — is withheld. A role that genuinely needs a variable
+# names it in lab.json as roles.<role>.env_keys; the worker's charter forbids
+# looking at it. The names actually passed are recorded in execution.json so
+# an ingest can see what the worker was given (names only, never values).
+WORKER_ENV_KEEP = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "LANG",
+    "PWD", "COLUMNS", "LINES", "TZ",
+}
+WORKER_ENV_KEEP_PREFIXES = ("LC_", "XDG_")
+
+
+def worker_environment(role, source=None):
+    """The environment a worker is launched with: an allowlist of harmless
+    names plus whatever this role's `env_keys` asks for by name. Never a
+    blocklist — a blocklist has to guess every provider's spelling."""
+    source = os.environ if source is None else source
+    wanted = set(WORKER_ENV_KEEP) | set(role.get("env_keys") or [])
+    env = {}
+    for name, value in source.items():
+        if name in wanted or name.startswith(WORKER_ENV_KEEP_PREFIXES):
+            env[name] = value
+    return env
+
 
 def launch_and_watch(argv, rundir, log, execution, limits, role, rid, rundir_rel):
     t0 = time.time()
     with open(log, "wb") as fh:           # a worker that dies at its API says
-        proc = subprocess.Popen(argv, cwd=str(rundir),           # so only here
+        env = worker_environment(role)
+        execution["env_keys"] = sorted(env)
+        proc = subprocess.Popen(argv, cwd=str(rundir), env=env,  # so only here
                                 stdout=fh, stderr=subprocess.STDOUT)
         execution["pid"] = proc.pid
         write_json(rundir / "execution.json", execution)
@@ -1261,10 +1293,12 @@ def launch_and_watch(argv, rundir, log, execution, limits, role, rid, rundir_rel
 
 def load_dispatch(problem, rid):
     p = run_dir(problem, rid) / "dispatch.json"
-    if not p.exists():
+    # Read as committed: a dispatch.json rolled back on disk to "open" by a
+    # stray checkout or stash must not make an ingested run look open again.
+    d = claims.committed_json(problem, p)
+    if d is None:
         refuse("there is no run %s under %s/runs. Run `run.py catchup` to "
                "see which runs are on file." % (rid, problem.name))
-    d = json.loads(p.read_text())
     if d.get("status") != "open":
         refuse("%s was already ingested on %s, with verdict %s. A run enters "
                "the record once. If the packet was wrong, dispatch a fresh "
@@ -2200,7 +2234,7 @@ def cmd_transcript(args):
         refuse("%s already has a transcript on record (%s). A record is added "
                "to, not overwritten; if the stored copy is the wrong session, "
                "say `--replace` and the swap is in the history." % (rid, stored))
-    d = load_json(run_dir(problem, rid) / "dispatch.json") or {}
+    d = claims.committed_json(problem, run_dir(problem, rid) / "dispatch.json") or {}
     found = attach_transcript(problem, root, rid, d, args.path)
     if found is None:
         print("Nothing attached to %s: no session file was found for it. Name "
