@@ -503,7 +503,14 @@ need explaining a month later are the ones that were filed broken.
 
 Discovery is configured, never compiled in — every command stores its
 sessions somewhere different, and a pattern in the script goes stale the
-first time one of them moves. A role in `lab.json` may carry
+first time one of them moves. The rule is derived from a real run: `run.py
+transcript <run> --discover` lists what the worker's command wrote during
+that run, `--accept N` records the rule it implies under
+`roles.<role>.transcript` in `lab.local.json` with that run as its example,
+and attaches the file. `references/transcripts.md` holds one worked example
+per tool family to compare against. Transcripts are on unless `lab.json`
+says `"transcripts": {"enabled": false}` or the role says `"transcript":
+false`. A role may also carry the rule by hand:
 `"transcript": {"glob": "<pattern>", "match": "<rule>"}`. The glob takes `~`
 and three spellings of the run directory — `{cwd}`, `{cwd_dashed}` (every
 `/` replaced by `-`), `{cwd_urlencoded}` — because the stores that name a
@@ -520,7 +527,9 @@ the working directory wants `path` with `{cwd_urlencoded}` or
 under another worker's verdict.
 
 `ingest.json` records the source path, the sha256 of the file as it stood,
-its size, its gzipped size, and whether the copy was kept. Over
+its size, its gzipped size, whether the copy was kept, and the token usage
+summed from it when the file's shape is known (codex and claude; null
+otherwise, never guessed) — the notebook entry's Resources line shows it. Over
 `transcripts.max_mb` in `lab.json` (default 20) it is described but not
 copied — the hash and the path are on record, so a large session can still
 be fetched by hand while that machine exists. Nothing found means
@@ -528,7 +537,8 @@ be fetched by hand while that machine exists. Nothing found means
 `ingest --transcript <path>` names the file yourself, for a worker the
 Director drove in its own session, where no role rule looks. `run.py lint`
 says whether a run has one, and catchup names every ingested run whose role
-says where to look and that has nothing stored. `run.py transcript <run>`
+says where to look and that has nothing stored, and counts the runs whose
+role has no rule yet. `run.py transcript <run>`
 attaches one afterwards — by the role's rule, or `--path` — for the run
 whose rule was wrong on the day, or whose store was still writing;
 `--replace` swaps one already on record, and the swap is in the history.

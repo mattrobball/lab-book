@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ID_LINE = re.compile(r"^C-(?:[a-z0-9][a-z0-9-]*-)?\d+$")
@@ -1599,3 +1600,108 @@ class TestBriefHeader(LabCase):
                               "--actor", "director") for i in range(41)]
         _, r = self.dispatch(self.headed("carry: [%s..%s]" % (ids[0], ids[-1])))
         self.assertIn("carries 41 claims", r.stdout)
+
+
+class TestTranscriptDiscovery(TestTranscripts):
+    """A role's transcript rule is derived from a file a real run wrote,
+    kept with that run as its example; transcripts can be switched off."""
+
+    def home(self):
+        h = Path(tempfile.mkdtemp(prefix="labtoolhome-"))
+        self.addCleanup(shutil.rmtree, h, ignore_errors=True)
+        return h
+
+    def test_rules_derived_from_the_three_known_shapes(self):
+        sys.path.insert(0, str(RUN.parent))
+        import run
+        rundir = Path("/Users/w/lab/problems/p/runs/R-007")
+        cases = [
+            ("/Users/w/.claude/projects/-Users-w-lab-problems-p-runs-R-007/"
+             "fce75688-564e-45a1-8e93-35503f8cfb10.jsonl",
+             "~/.claude/projects/{cwd_dashed}/*.jsonl", "path"),
+            ("/Users/w/.grok/sessions/%2FUsers%2Fw%2Flab%2Fproblems%2Fp%2Fruns"
+             "%2FR-007/01a07e95-fe3f-7421-ac55-51e26e4d4e07/chat_history.jsonl",
+             "~/.grok/sessions/{cwd_urlencoded}/*/chat_history.jsonl", "path"),
+            ("/Users/w/.codex/sessions/2026/09/10/rollout-2026-09-10T13-33-33-"
+             "01a08c61-c664-7d02-a915-9f54524591ad.jsonl",
+             "~/.codex/sessions/*/*/*/*.jsonl", "path"),
+        ]
+        with patch.object(Path, "home", return_value=Path("/Users/w")):
+            for path, glob, match in cases:
+                rule = run.derive_rule(Path(path), rundir)
+                self.assertEqual(rule["glob"], glob)
+                self.assertEqual(rule["match"], match)
+
+    def test_usage_summed_from_codex_and_claude_shapes(self):
+        sys.path.insert(0, str(RUN.parent))
+        import run
+        codex = self.store / "codex.jsonl"
+        codex.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "session_meta", "payload": {"cwd": "/x"}},
+            {"type": "token_usage_record", "payload": {"usage": {
+                "input_tokens": 100, "output_tokens": 10, "total_tokens": 110}}},
+            {"type": "token_usage_record", "payload": {"usage": {
+                "input_tokens": 200, "output_tokens": 20, "total_tokens": 220}}},
+        ]) + "\n")
+        self.assertEqual(run.usage_from_transcript(codex),
+                         {"input": 300, "output": 30, "total": 330, "source": "codex"})
+        claude = self.store / "claude.jsonl"
+        claude.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "summary"},
+            {"type": "assistant", "message": {"usage": {
+                "input_tokens": 2, "cache_read_input_tokens": 50,
+                "cache_creation_input_tokens": 8, "output_tokens": 5}}},
+        ]) + "\n")
+        self.assertEqual(run.usage_from_transcript(claude),
+                         {"input": 60, "output": 5, "total": 65, "source": "claude"})
+        self.assertIsNone(run.usage_from_transcript(
+            self.session(self.store / "other.jsonl")))
+
+    def test_discover_lists_then_accept_records_rule_and_attaches(self):
+        home = self.home()
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertIn("no transcript rule", r.stdout)
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("has no rule yet", out.split("Attention:")[1])
+        # the worker's command wrote its session in a folder named after cwd
+        folder = home / "projects" / str(self.rundir(rid)).replace("/", "-")
+        mine = self.session(folder / "abcdefab-1234-1234-1234-abcdefabcdef.jsonl",
+                            cwd=self.rundir(rid))
+        env = {"LAB_TOOL_HOMES": str(home)}
+        r = self.ok("transcript", rid, "--discover", env=env)
+        self.assertIn("1. %s" % mine, r.stdout)
+        self.assertIn("{cwd_dashed}", r.stdout)
+        r = self.ok("transcript", rid, "--accept", "1", env=env)
+        rule = self.local()["roles"]["manual"]["transcript"]
+        self.assertEqual(rule["match"], "path")
+        self.assertTrue(rule["glob"].endswith("/projects/{cwd_dashed}/*.jsonl"), rule)
+        self.assertEqual(rule["example"]["run"], rid)
+        self.assertIn('"cwd"', rule["example"]["first_line"])
+        self.assertEqual(self.stored_bytes(rid), mine.read_bytes())
+        self.assertNotIn("has no rule yet",
+                         self.ok("catchup", "2020-01-01").stdout)
+        # and the rule now works on its own for the next run
+        rid2, _ = self.dispatch(self.brief("Again.", "b2.md"))
+        second = self.session(home / "projects" /
+                              str(self.rundir(rid2)).replace("/", "-") / "x.jsonl",
+                              cwd=self.rundir(rid2))
+        self.packet(rid2)
+        self.ok("ingest", rid2)
+        self.assertEqual(self.stored_bytes(rid2), second.read_bytes())
+
+    def test_switched_off_means_not_looked_for_and_not_counted(self):
+        self.configure(transcripts={"enabled": False})
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        r = self.ok("ingest", rid)
+        self.assertNotIn("transcript", r.stdout.lower())
+        self.assertIsNone(self.transcript_json(rid))
+        self.assertNotIn("transcript", self.ok("catchup", "2020-01-01").stdout)
+        # per role too
+        self.configure(transcripts={"enabled": True})
+        self.configure(transcript=False)
+        rid2, _ = self.dispatch(self.brief("Again.", "b2.md"))
+        self.packet(rid2)
+        self.assertNotIn("transcript", self.ok("ingest", rid2).stdout.lower())

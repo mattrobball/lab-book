@@ -785,6 +785,11 @@ def resource_line(problem, rid):
         bits.append("%dm%02ds wall" % divmod(e["wall_seconds"], 60))
     for k, v in sorted((e.get("usage") or {}).items()):
         bits.append("%s %s" % (v, k))
+    t = (ingest_record(problem, rid) or {}).get("transcript") or {}
+    if t.get("usage"):
+        u = t["usage"]
+        bits.append("%s tokens (%s in, %s out; from the %s session)"
+                    % (u["total"], u["input"], u["output"], u["source"]))
     return " · ".join(bits) if bits else None
 
 
@@ -901,6 +906,126 @@ def digest_and_gzip(path):
     return h.hexdigest(), size, buf.getvalue()
 
 
+def transcripts_on(root, role):
+    """Transcripts are on unless lab.json says transcripts.enabled false or
+    the role says transcript false. Off means: not looked for, not
+    counted as missing."""
+    lab = lab_config(root)
+    if (lab.get("transcripts") or {}).get("enabled") is False:
+        return False
+    return ((lab.get("roles") or {}).get(role) or {}).get("transcript") is not False
+
+
+# Where the worker commands seen so far keep their sessions. Only the
+# discovery step reads this list, to offer candidates; the rule that gets
+# recorded is derived from a file that a real run of this lab produced.
+TOOL_HOMES = os.environ.get("LAB_TOOL_HOMES", ":".join((
+    "~/.codex/sessions", "~/.claude/projects", "~/.grok/sessions",
+    "~/.local/share/opencode"))).split(":")
+SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+STAMPED = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}")
+
+
+def candidate_transcripts(problem, rid, d):
+    """Files under the tool homes written inside the run's window, newest
+    first, lock files and empty files left out."""
+    start, end = run_window(problem, rid, d)
+    hits = []
+    for home in TOOL_HOMES:
+        base = Path(os.path.expanduser(home))
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if not path.is_file() or path.name.endswith(".lock") or \
+                    path.name.startswith("."):
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if start <= st.st_mtime <= end and st.st_size > 0:
+                hits.append((st.st_mtime, path))
+    return [p for _, p in sorted(hits, reverse=True)]
+
+
+def derive_rule(path, rundir):
+    """A role rule from one session file this run produced: the run
+    directory becomes a placeholder in whichever spelling the store used,
+    date and session-id components become wildcards, a stamped basename
+    becomes a wildcard with its suffix. `match` is path when a placeholder
+    names the run, else first-line-cwd when the file's first line names it,
+    else path."""
+    cwd = str(Path(rundir).resolve())
+    text = str(path)
+    spellings = ((urllib.parse.quote(cwd, safe=""), "{cwd_urlencoded}"),
+                 (cwd.replace("/", "-"), "{cwd_dashed}"), (cwd, "{cwd}"))
+    placed = False
+    for literal, key in spellings:
+        if literal in text:
+            text = text.replace(literal, key)
+            placed = True
+            break
+    parts = []
+    for i, comp in enumerate(text.split("/")):
+        last = i == text.count("/")
+        if comp.startswith("{"):
+            parts.append(comp)
+        elif SESSION_ID.match(Path(comp).stem) or STAMPED.search(comp):
+            parts.append("*" + Path(comp).suffix if last else "*")
+        elif not last and re.fullmatch(r"\d{2,4}", comp):
+            parts.append("*")
+        else:
+            parts.append(comp)
+    glob = "/".join(parts)
+    home = str(Path.home())
+    if glob.startswith(home + "/"):
+        glob = "~" + glob[len(home):]
+    if placed:
+        match = "path"
+    elif first_line_cwd(path) and Path(first_line_cwd(path)).resolve() == Path(cwd):
+        match = "first-line-cwd"
+    else:
+        match = "path"
+    return {"glob": glob, "match": match}
+
+
+def usage_from_transcript(path):
+    """Token counts summed from a session file whose shape is known: codex
+    (token_usage_record lines) and claude (message.usage per assistant
+    turn). None for any other shape — never guessed."""
+    tin = tout = ttotal = 0
+    source = None
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("type") == "token_usage_record":
+                    u = (rec.get("payload") or {}).get("usage") or {}
+                    tin += u.get("input_tokens", 0)
+                    tout += u.get("output_tokens", 0)
+                    ttotal += u.get("total_tokens", 0)
+                    source = "codex"
+                elif isinstance(rec.get("message"), dict) and \
+                        isinstance(rec["message"].get("usage"), dict):
+                    u = rec["message"]["usage"]
+                    i = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                         + u.get("cache_creation_input_tokens", 0))
+                    tin += i
+                    tout += u.get("output_tokens", 0)
+                    ttotal += i + u.get("output_tokens", 0)
+                    source = "claude"
+    except OSError:
+        return None
+    if source is None:
+        return None
+    return {"input": tin, "output": tout, "total": ttotal, "source": source}
+
+
 def attach_transcript(problem, root, rid, d, override=None):
     """Copy the worker's own transcript into the run and describe it for
     ingest.json. The stdout log says what a worker printed; the reasoning
@@ -909,6 +1034,8 @@ def attach_transcript(problem, root, rid, d, override=None):
     explaining later are the ones filed broken. Never refuses: a missing
     transcript is a thinner record, not a bad one."""
     setting = transcript_setting(root, d.get("role"))
+    if not override and not transcripts_on(root, d.get("role")):
+        return None
     if override:
         source = Path(override).expanduser()
         if not source.is_file():
@@ -922,10 +1049,16 @@ def attach_transcript(problem, root, rid, d, override=None):
             print("No transcript found for %s under roles.%s.transcript "
                   "(nothing matched inside the run's own window). The run is "
                   "filed without one." % (rid, d.get("role")))
+        else:
+            print("Role %s has no transcript rule, so %s is filed without its "
+                  "session. `run.py transcript %s --discover` finds the file "
+                  "this run wrote and records the rule for next time."
+                  % (d.get("role"), rid, rid))
         return None
     sha, size, blob = digest_and_gzip(source)
     record = {"source": str(source), "sha256": sha, "bytes": size,
-              "gzipped_bytes": len(blob), "stored": False}
+              "gzipped_bytes": len(blob), "stored": False,
+              "usage": usage_from_transcript(source)}
     cap = (lab_config(root).get("transcripts") or {}).get("max_mb")
     cap = DEFAULT_MAX_MB if cap is None else cap
     if record["gzipped_bytes"] > cap * 1024 * 1024:
@@ -2328,14 +2461,27 @@ def catchup_lints(problem, root=None):
         if len(dupes) > 8:
             lines.append("  ... and %d more" % (len(dupes) - 8))
 
-    thin = []
+    thin, unruled = [], {}
     for rid, d in runs:
         ing = ingest_record(problem, rid)
-        if not ing or not transcript_setting(root, d.get("role")).get("glob"):
+        if not ing or not transcripts_on(root, d.get("role")):
+            continue
+        if not transcript_setting(root, d.get("role")).get("glob"):
+            if ing.get("transcript") is None:
+                unruled.setdefault(d.get("role") or "?", []).append(rid)
             continue
         t = ing.get("transcript")
         if t is None or not t.get("stored"):
             thin.append(rid)
+    if unruled:
+        lines.append("%d ingested run(s) have no transcript because their role "
+                     "has no rule yet — `run.py transcript <run> --discover` on "
+                     "one run per role finds the session file and records the "
+                     "rule (or set the role's transcript to false): %s"
+                     % (sum(len(v) for v in unruled.values()),
+                        "; ".join("%s: %s%s" % (role, ", ".join(v[:3]),
+                                                ", …" if len(v) > 3 else "")
+                                  for role, v in sorted(unruled.items()))))
     if thin:
         lines.append("%d ingested run(s) have no transcript stored, though "
                      "their role says where to find one — `run.py transcript "
@@ -2459,12 +2605,44 @@ def cmd_transcript(args):
                "transcript to yet. Ingest or file the run first; ingest looks "
                "for the transcript itself." % rid)
     tag = require_owner(problem, root, rid, "attaching a transcript")
+    d = claims.committed_json(problem, run_dir(problem, rid) / "dispatch.json") or {}
+    if args.discover or args.accept is not None:
+        found = candidate_transcripts(problem, rid, d)
+        if not found:
+            refuse("nothing under %s was written inside %s's window. If the "
+                   "worker's command keeps sessions elsewhere, set "
+                   "LAB_TOOL_HOMES to that directory and try again."
+                   % (", ".join(TOOL_HOMES), rid))
+        rules = [(p, derive_rule(p, run_dir(problem, rid))) for p in found[:12]]
+        if args.accept is None:
+            print("Files written during %s, newest first. Pick the session "
+                  "file (the one holding the worker's turns) and record its "
+                  "rule with `--accept N`:" % rid)
+            for n, (p, rule) in enumerate(rules, 1):
+                print("%2d. %s (%d bytes)\n    rule: %s, match %s"
+                      % (n, p, p.stat().st_size, rule["glob"], rule["match"]))
+            return
+        if not 1 <= args.accept <= len(rules):
+            refuse("--accept %s is not one of the %d candidates listed by "
+                   "--discover." % (args.accept, len(rules)))
+        path, rule = rules[args.accept - 1]
+        try:
+            first = open(path, errors="replace").readline().strip()[:200]
+        except OSError:
+            first = ""
+        rule["example"] = {"run": rid, "path": str(path), "first_line": first}
+        local = claims.local_config(root)
+        local.setdefault("roles", {}).setdefault(d.get("role"), {})["transcript"] = rule
+        claims.write_config(root / claims.LOCAL_CONFIG, local)
+        print("roles.%s.transcript recorded in %s: glob %s, match %s, with %s "
+              "as the example." % (d.get("role"), claims.LOCAL_CONFIG,
+                                    rule["glob"], rule["match"], path.name))
+        args.path = str(path)
     stored = run_dir(problem, rid) / TRANSCRIPT_NAME
     if stored.exists() and not args.replace:
         refuse("%s already has a transcript on record (%s). A record is added "
                "to, not overwritten; if the stored copy is the wrong session, "
                "say `--replace` and the swap is in the history." % (rid, stored))
-    d = claims.committed_json(problem, run_dir(problem, rid) / "dispatch.json") or {}
     found = attach_transcript(problem, root, rid, d, args.path)
     if found is None:
         print("Nothing attached to %s: no session file was found for it. Name "
@@ -3594,6 +3772,12 @@ def main(argv=None):
                     help="the session file, when the role's rule cannot find it")
     tr.add_argument("--replace", action="store_true",
                     help="replace a transcript already on record")
+    tr.add_argument("--discover", action="store_true",
+                    help="list the files the worker's command wrote during "
+                         "this run, each with the rule it implies")
+    tr.add_argument("--accept", type=int, metavar="N",
+                    help="record candidate N from --discover as the role's "
+                         "rule, with this run as its example, and attach it")
     tr.set_defaults(func=cmd_transcript)
 
     up = sub.add_parser("upgrade", help="bring this lab's copies of the "

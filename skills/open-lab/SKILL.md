@@ -112,7 +112,10 @@ Then scaffold the lab repository:
    `lab.local.json` takes the discovery results — this machine's models,
    launch commands, tools and limits — plus `director.model`, the model
    this Director session runs on, which every claim you state is stamped
-   with; it is never committed. `lab.json`
+   with; it is never committed. After each role's first real run, `run.py
+   transcript <run> --discover` then `--accept N` records where that
+   command keeps its session (`references/transcripts.md` shows the
+   shapes). `lab.json`
    takes what the group owns: `kit_version` from this SKILL.md's
    `metadata.version`, the caps, and `policy`, the standing rules in plain
    sentences that anyone joining later is read.
