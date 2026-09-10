@@ -91,7 +91,8 @@ file that owns the rule.
   what counts as success. *"Prove or refute: the largest cap in dimension 4
   has 20 points."*
 - **Run** — one worker sent on one brief, numbered `R-ann-001`, `R-ann-002`,
-  … with your name in the middle, so two people's runs never collide.
+  … with your name in the middle, so two people's runs never collide. One
+  counter for the whole lab, never per problem: an ID names one thing.
 - **Packet** — what the worker brings back: a verdict (PASS, FAIL, or
   UNDECIDED), what it did, what it does *not* claim, and how to check it.
 - **Ingest** — the gate: the packet is checked, its evidence is re-run by
@@ -111,7 +112,7 @@ file that owns the rule.
 
 ## When it refuses
 
-Four things are enforced by the scripts. The Director will not work around
+Six things are enforced by the scripts. The Director will not work around
 them, and neither should you; each refusal tells you what to do.
 
 1. **A claim's status changes only through the script.** You will see the
@@ -127,6 +128,14 @@ them, and neither should you; each refusal tells you what to do.
    record your answer, and run one small test task afterwards. (Your own
    machine's settings — which models you can run, how they start — are yours
    to change freely.)
+5. **A PASS that does not replay is not a PASS.** If the machine cannot
+   reproduce what the worker said it printed, the run is filed UNDECIDED
+   with the worker's PASS kept beside it.
+6. **When a claim falls, everything standing on it falls too.** Demote or
+   supersede a claim and every verified claim resting on it, directly or
+   through others, becomes conditional on its return; a referee that finds
+   unproved steps under a proof files them, and the claim rests on them
+   from that moment. The dependency graph cannot loop.
 
 Two more things come to you as decisions, never taken alone: a worker that
 has gone over its time or memory budget (kill it, or let it run), and a
@@ -225,11 +234,29 @@ restart; if "open the lab" is not recognised, restart the tool.
 
 ## Status
 
-Version 1.4.0. The charter, the two references, the templates, the
-glossary, and both scripts with their test suite (125 tests:
-`python3 -m unittest` from `skills/open-lab/scripts/tests/`). Exercised end
-to end by a scripted cold start and a simulated two-person meeting; the
-first real group lab is next.
+Version 2.0.0. The charter, the three references, the templates, the
+glossary, and both scripts with their test suite (187 tests:
+`python3 -m unittest discover -s tests` from `skills/open-lab/scripts/`).
+Exercised end to end by a scripted cold start and a simulated two-person
+meeting, and revised after reading the records of three live labs (about
+1,500 runs) against what their Directors had to work around.
+
+What 2.0.0 changed, and why each is not compatible with 1.4.0:
+
+- The record is what is committed. Every status is read from the last
+  commit, so a stray checkout or stash cannot roll a run back to open or a
+  claim back a status. An ingest is one transaction, one commit.
+- Run and claim IDs are numbered across the whole lab, with a marker per
+  ID naming its problem.
+- A brief opens with a header the harness reads: kind, the run it checks,
+  the claims it carries, where the worker may write, its budget. Carried
+  claims are written into the prompt with their live status; ranges expand.
+- Every claim records the model that discovered it; the Director's model
+  is set once in `lab.local.json`, and verification never says "unknown".
+- Workers get an allowlisted environment, never the Director's keys.
+- Transcript rules are derived from a real run and kept with an example;
+  token usage is read from the transcript where its shape is known.
+- Identity comes from the lab's own settings, asked once, not from git.
 
 ## Contributing
 
