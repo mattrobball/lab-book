@@ -92,6 +92,12 @@ of that move.
   is allowed, not preferred, and always visible: the reference run promoted
   a claim on a run by the very model that discovered it, and nothing showed
   it.
+- **The dependency graph is a DAG.** `--rests-on` and a referee's `steps_of`
+  are refused when they would make a claim rest, through others, on
+  itself. A referee that finds unstated steps under a claim's proof files
+  them through `steps_of`, and the claim rests on them from that moment;
+  a frozen list declared once at promotion is how a headline theorem stood
+  a day on steps filed as proposed in the same minute it was affirmed.
 - **When a claim falls, its dependents fall with it.** Refuting, superseding
   or demoting moves every verified claim resting on it, transitively, to
   conditional on its return, with the reason on the ledger; a supersession

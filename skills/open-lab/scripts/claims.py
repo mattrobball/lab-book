@@ -436,10 +436,11 @@ def committed_text(problem, path):
         except ValueError:
             pass
     if rel is not None:
-        if rel not in _COMMITTED:
-            _COMMITTED[rel] = read_branch_file(root, "HEAD", rel)
-        if _COMMITTED[rel] is not None:
-            return _COMMITTED[rel]
+        key = (str(root), rel)           # one process may serve several labs
+        if key not in _COMMITTED:
+            _COMMITTED[key] = read_branch_file(root, "HEAD", rel)
+        if _COMMITTED[key] is not None:
+            return _COMMITTED[key]
     try:
         return path.read_text()
     except OSError:
@@ -909,6 +910,49 @@ def cascade_plan(claims, cid, target, by, actor, when=None):
     return events
 
 
+def would_cycle(claims, cid, deps):
+    """The dependencies among `deps` that already rest, directly or through
+    other claims, on `cid` — resting `cid` on them would close a loop, and
+    a dependency graph with a loop proves everything from itself."""
+    below = set(dependents(claims, cid))
+    return [d for d in deps if d == cid or d in below]
+
+
+def steps_found(claims, cid, steps, rid, actor, when=None):
+    """A referee run `rid` found that `cid`'s proof rests on `steps`, claims
+    it has just proposed. Events: `cid` now rests on them too (an affirm
+    carrying rests_on); if `cid` was verified it goes to conditional on
+    them, and the cascade takes its verified dependents with it. C-507 sat
+    verified for a day on steps R-158 had filed as proposed in the same
+    minute it affirmed C-507, with nothing relating the two."""
+    when = when or now()
+    c = claims[cid]
+    rests = list(c.get("rests_on") or [])
+    new = [x for x in steps if x not in rests]
+    if not new:
+        return []
+    rests += new
+    events = [{"event": "affirm", "id": cid, "ts": when, "actor": actor,
+               "status": c["status"], "hash": c["hash"], "rests_on": rests,
+               "reason": "%s found the proof of %s rests on %s, which it "
+                         "proposed; recorded as dependencies."
+                         % (rid, cid, ", ".join(new))}]
+    if c["status"] == "verified":
+        conditions = c["conditions"].strip()
+        clause = "%s verified" % ", ".join(new)
+        conditions = (conditions + "; " + clause) if conditions else clause
+        events.append({"event": "set", "id": cid, "ts": when, "actor": actor,
+                       "from": "verified", "to": "conditional", "evidence": None,
+                       "by": None, "statement": c["statement"],
+                       "conditions": conditions, "rests_on": rests,
+                       "reason": "%s found steps of %s's proof that are not "
+                                 "yet verified: %s. Verified cannot stand on "
+                                 "proposed." % (rid, cid, ", ".join(new)),
+                       "hash": text_hash(c["statement"], conditions)})
+        events += cascade_plan(claims, cid, "conditional", None, actor, when)
+    return events
+
+
 def cascade(problem, claims, cid, target, by, actor, tag=None):
     """Append, regenerate and commit each event cascade_plan returns, one
     commit per claim so the log reads like every other status change."""
@@ -1217,6 +1261,12 @@ def cmd_set(args):
             if r not in claims:
                 refuse("%s rests on %s, which is not a claim in this ledger."
                        % (cid, r))
+        loop = would_cycle(claims, cid, rests)
+        if loop:
+            refuse("%s cannot rest on %s: %s already rest%s on %s, and a "
+                   "dependency loop would prove both from each other."
+                   % (cid, ", ".join(loop), ", ".join(loop),
+                      "" if len(loop) > 1 else "s", cid))
 
     view = sections(problem / "claims" / (cid + ".md"))
     statement = view.get("statement", c["statement"]).strip() or c["statement"]

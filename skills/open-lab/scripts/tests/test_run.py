@@ -1749,3 +1749,70 @@ class TestLabWideIds(LabCase):
         out = self.ok("catchup", "2020-01-01").stdout
         self.assertIn("went over a budget", out.split("Attention:")[1])
         self.assertIn("nothing was killed", out)
+
+
+class TestStepsOf(LabCase):
+    """A referee that finds unstated steps under a claim's proof files them
+    as dependencies; a verified claim then stops being verified."""
+
+    def verified_pair(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        self.ok("ingest", rid)
+        c1 = self.claims_py("new", "--statement", "The bound is 9.", "--actor", "d")
+        self.claims_py("set", c1, "verified", "--evidence", rid, "--rests-on", "none",
+                       "--actor", "checker")
+        c2 = self.claims_py("new", "--statement", "So the bound is sharp.",
+                            "--actor", "d", "--rests-on", c1)
+        self.claims_py("set", c2, "verified", "--evidence", rid, "--actor", "checker")
+        return rid, c1, c2
+
+    def test_steps_found_demote_the_claim_and_its_dependents(self):
+        rid0, c1, c2 = self.verified_pair()
+        d = self.problem / "briefs"
+        brief = d / "check.md"
+        brief.write_text("---\nkind: check\nchecks: %s\ncarry: [%s]\n---\n"
+                         "# Brief: check\n\n## Goal\n\nCheck it.\n" % (rid0, c1))
+        rid, _ = self.dispatch(brief, extra=["--model", "worker-b"])
+        self.packet(rid, ret={"claims_used": [c1],
+                              "claims_proposed": ["Step A holds.", "Step B holds."],
+                              "steps_of": {c1: [0, "Step B holds."]},
+                              "reviewed": [rid0]})
+        before = self.log().count("\n")
+        r = self.ok("ingest", rid)
+        self.assertEqual(self.log().count("\n") - before, 1)     # still one commit
+        self.assertIn("%s verified -> conditional" % c1, r.stdout)
+        sys.path.insert(0, str(RUN.parent))
+        import claims
+        known, _ = claims.load(self.problem)
+        self.assertEqual(known["C-003"]["statement"], "Step A holds.")
+        self.assertEqual(known[c1]["status"], "conditional")
+        self.assertEqual(known[c1]["rests_on"], ["C-003", "C-004"])
+        self.assertIn("C-003, C-004 verified", known[c1]["conditions"])
+        self.assertEqual(known[c2]["status"], "conditional")     # cascaded
+        self.assertEqual(git(self.root, "status", "--short").stdout.strip(), "")
+
+    def test_a_loop_is_refused_at_set_and_at_ingest(self):
+        rid0, c1, c2 = self.verified_pair()
+        r = self.script(CLAIMS, "set", c1, "conditional", "--conditions", "x",
+                        "--reason", "y", "--rests-on", c2, "--actor", "d")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("loop", r.stderr)
+        sys.path.insert(0, str(RUN.parent))
+        import claims
+        known, _ = claims.load(self.problem)
+        self.assertEqual(claims.would_cycle(known, c1, [c2]), [c2])
+        self.assertEqual(claims.would_cycle(known, c2, [c1]), [])
+
+    def test_bad_steps_of_is_refused_before_anything_is_filed(self):
+        rid0, c1, c2 = self.verified_pair()
+        brief = self.problem / "briefs" / "check.md"
+        brief.write_text("---\ncarry: [%s]\n---\n# Brief: check\n\n## Goal\n\nCheck.\n" % c1)
+        rid, _ = self.dispatch(brief, extra=["--model", "worker-b"])
+        self.packet(rid, ret={"claims_used": [c1], "claims_proposed": ["Step A."],
+                              "steps_of": {c1: [3]}})
+        self.assertIn("position 3", self.refused("ingest", rid))
+        self.packet(rid, ret={"claims_used": [c1], "claims_proposed": ["Step A."],
+                              "steps_of": {"C-099": [0]}})
+        self.assertIn("not in claims_used", self.refused("ingest", rid))
+        self.assertEqual(len(self.ledger()), 4)                  # nothing new

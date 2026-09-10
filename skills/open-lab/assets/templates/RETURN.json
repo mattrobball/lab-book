@@ -5,5 +5,6 @@
   "machine_markers": ["<MARKER_ONE_OK>"],
   "claims_used": ["<C-NNN>"],
   "claims_proposed": ["<a statement someone could show to be wrong>"],
-  "reviewed": ["<R-NNN — only for a check of another run; otherwise drop this line>"]
+  "reviewed": ["<R-NNN — only for a check of another run; otherwise drop this line>"],
+  "steps_of": {"<C-NNN from claims_used>": ["<0-based positions in claims_proposed of the steps its proof rests on; otherwise drop this line>"]}
 }

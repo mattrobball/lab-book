@@ -151,6 +151,14 @@ Both of these files, under `{packet}`:
   IDs you refereed, e.g. `["R-030"]`. Omit it for any other kind of run.
   Without it the run you checked stays flagged as unreviewed, however
   complete your check was.
+- `steps_of` — only when a claim you proposed is a step the proof of a claim
+  you were given depends on: `{{"C-507": [0, 2]}}` maps that claim's ID to
+  the positions (or exact text) of those entries in `claims_proposed`. A
+  step you found under a verified claim's proof is a finding, not a
+  footnote: the lab records the dependency and, if the step is not yet
+  verified, the claim stops being verified until it is. Affirming a claim
+  while proposing unstated steps of its proof, with nothing tying them
+  together, once left a headline theorem standing on unproved steps.
 
 ## Before you finish
 
@@ -1679,6 +1687,31 @@ def read_packet(problem, rid, d):
                    "Proposed claims are plain statements — workers never mint "
                    "IDs, and ingest allocates one for each statement it files. "
                    "%s" % (rid, hit.group(0), s, tail))
+    steps = ret.get("steps_of")
+    if steps is not None:
+        if not isinstance(steps, dict):
+            refuse("steps_of in %s must be an object mapping a claim ID from "
+                   "claims_used to a list of entries of claims_proposed (by "
+                   "0-based position or exact statement). %s" % (rid, tail))
+        for target, items in steps.items():
+            if target not in ret["claims_used"]:
+                refuse("steps_of in %s names %s, which is not in claims_used. "
+                       "Only a claim you were given can have steps found "
+                       "under its proof. %s" % (rid, target, tail))
+            if not isinstance(items, list) or not items:
+                refuse("steps_of[%s] in %s must be a non-empty list. %s"
+                       % (target, rid, tail))
+            for item in items:
+                if isinstance(item, int):
+                    if not 0 <= item < len(ret["claims_proposed"]):
+                        refuse("steps_of[%s] in %s names position %d, and "
+                               "claims_proposed has %d entries. %s"
+                               % (target, rid, item, len(ret["claims_proposed"]),
+                                  tail))
+                elif item not in ret["claims_proposed"]:
+                    refuse("steps_of[%s] in %s names a statement that is not "
+                           "in claims_proposed word for word: %r. %s"
+                           % (target, rid, item, tail))
     stray = [c for c in ret["claims_used"] if c not in d["claims_pasted"]]
     if stray:
         refuse("claims_used in %s names %s, which this dispatch never pasted "
@@ -2002,6 +2035,31 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
                             "side by side before either is promoted"
                             % (cid, ", ".join(dupes)))
 
+    steps_notes = []
+    if allocated and ret.get("steps_of"):
+        known, _ = claims.load(problem)
+        for target, items in ret["steps_of"].items():
+            if target not in known:
+                refuse("steps_of names %s, which is not a claim in this "
+                       "problem." % target)
+            ids = [allocated[i][0] if isinstance(i, int) else
+                   next(c for c, st in allocated if st == i) for i in items]
+            loop = claims.would_cycle(known, target, ids)
+            if loop:
+                refuse("steps_of would make %s rest on %s, which already rest "
+                       "on it — a loop. Nothing is filed; state the steps so "
+                       "they do not cite %s." % (target, ", ".join(loop), target))
+            for ev in claims.steps_found(known, target, ids, rid, actor):
+                claims.append(problem, ev, tag)
+                if ev["event"] == "set":
+                    steps_notes.append("%s %s -> %s (its proof rests on %s, "
+                                       "proposed)" % (ev["id"], ev["from"],
+                                                      ev["to"], ", ".join(ids)))
+                elif ev["id"] == target:
+                    steps_notes.append("%s now rests on %s as well"
+                                       % (target, ", ".join(ids)))
+            known, _ = claims.load(problem)
+        warnings += steps_notes
     body = ["**Run:** %s · **Actor:** %s · **Model:** %s · **Verdict:** %s"
             % (rid, actor, d["model"], verdict),
             "**Replayed:** %s%s" % ("yes" if replayed else "no",
@@ -2052,6 +2110,8 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
         claims.regenerate(problem)
         paths += [rel(problem / "claims", root), rel(problem / "CLAIMS.md", root),
                   claims.IDS_DIR]
+    for line in steps_notes:
+        print("- " + line)
     message = "%s ingested: %s — %s" % (rid, verdict, ret["headline"])
     if allocated:
         message += "\n\n" + "\n".join("%s new (proposed): %s"

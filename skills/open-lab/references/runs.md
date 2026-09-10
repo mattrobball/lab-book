@@ -411,7 +411,12 @@ retried forever.
 brief), `claims_proposed` — **plain statements, never IDs** — and, for a
 check of another run, `reviewed`: the IDs refereed. That last field is what
 clears "review owed" on the run checked; one lab went weeks without a
-worker being told it existed, and cleared every review by hand. Workers do
+worker being told it existed, and cleared every review by hand. `steps_of`,
+when a proposed claim is a step the proof of a carried claim depends on,
+maps that claim's ID to the positions of those proposals: ingest records
+them as dependencies, and a verified claim found to rest on proposed steps
+goes to conditional until they are verified, its own dependents with it.
+Ingest refuses a `steps_of` or `--rests-on` that would close a loop. Workers do
 not mint claim IDs, do not grade themselves, and do not name themselves:
 ingest stamps the actor from `dispatch.json`. Before finishing, a worker runs
 `run.py lint R-NNN` — read-only — and does not stop until the packet passes.
