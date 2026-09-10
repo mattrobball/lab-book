@@ -65,6 +65,8 @@ class FederationCase(unittest.TestCase):
         git(self.tmp, "clone", "-q", str(self.remote), str(d))
         git(d, "config", "user.name", user)
         git(d, "config", "user.email", "%s@example.invalid" % name)
+        (d / "lab.local.json").write_text(json.dumps(
+            {"director": {"model": "director-model"}}))
         return d
 
     def problem(self, clone):
@@ -150,6 +152,7 @@ class FederationCase(unittest.TestCase):
 class TestJoin(FederationCase):
 
     def test_join_registers_creates_the_branch_and_is_idempotent(self):
+        (self.alice / "lab.local.json").unlink()      # join creates it
         r = self.join(self.alice)
         self.assertIn("Joined as alice", r.stdout)
         # A joiner is left the file their own machine answers for, and told

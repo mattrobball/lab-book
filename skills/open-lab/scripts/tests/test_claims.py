@@ -42,6 +42,9 @@ class LabCase(unittest.TestCase):
         self.problem = self.root / "problems" / "demo"
         (self.problem / "claims").mkdir(parents=True)
         (self.problem / "README.md").write_text("# demo\n")
+        (self.root / ".gitignore").write_text("lab.local.json\n")
+        (self.root / "lab.local.json").write_text(json.dumps(
+            {"director": {"model": "director-model"}}))
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "seed")
 
@@ -71,10 +74,11 @@ class LabCase(unittest.TestCase):
             args += ["--" + k.replace("_", "-"), v]
         return claim_id(self.ok(*args).stdout)
 
-    def ingest_run(self, run_id="R-007", verdict="PASS"):
+    def ingest_run(self, run_id="R-007", verdict="PASS", model="checker-model"):
         d = self.problem / "runs" / run_id / "packet"
         d.mkdir(parents=True)
         (d / "RETURN.json").write_text(json.dumps({"headline": "checked"}))
+        (d.parent / "dispatch.json").write_text(json.dumps({"model": model}))
         if verdict:
             (d.parent / "ingest.json").write_text(json.dumps({"verdict": verdict}))
         git(self.root, "add", "-A")

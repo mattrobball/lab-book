@@ -1628,9 +1628,10 @@ def do_replay(rundir, secs, ret, rid, timeout):
     return True, [], record
 
 
-def allocate_claim(problem, statement, actor, tag=None):
-    """On the ledger, not yet committed: the ingest commits once."""
-    return claims.record_new(problem, statement, actor, tag)
+def allocate_claim(problem, statement, actor, tag=None, model=None):
+    """On the ledger, not yet committed: the ingest commits once. The run's
+    model is the claim's discovering model."""
+    return claims.record_new(problem, statement, actor, tag, model=model)
 
 
 def discard_half_ingest(problem, root, rid):
@@ -1867,7 +1868,7 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
     allocated = []
     for statement in ret["claims_proposed"]:
         dupes = near_duplicates(problem, statement)
-        cid = allocate_claim(problem, statement, actor, tag)
+        cid = allocate_claim(problem, statement, actor, tag, d.get("model"))
         allocated.append((cid, statement))
         if dupes:
             warnings.append("%s looks close to %s already on file — read them "

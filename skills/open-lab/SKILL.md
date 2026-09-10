@@ -110,7 +110,9 @@ Then scaffold the lab repository:
 3. Write the two configuration files, whose shapes are in
    `references/runs.md`; the skill ships no models or commands of its own.
    `lab.local.json` takes the discovery results — this machine's models,
-   launch commands, tools and limits — and is never committed. `lab.json`
+   launch commands, tools and limits — plus `director.model`, the model
+   this Director session runs on, which every claim you state is stamped
+   with; it is never committed. `lab.json`
    takes what the group owns: `kit_version` from this SKILL.md's
    `metadata.version`, the caps, and `policy`, the standing rules in plain
    sentences that anyone joining later is read.

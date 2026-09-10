@@ -41,6 +41,7 @@ class LabCase(unittest.TestCase):
         # committed; the shared one holds what the group owns.
         (self.root / "lab.json").write_text(json.dumps({}))
         (self.root / "lab.local.json").write_text(json.dumps({
+            "director": {"model": "director-model"},
             "roles": {"technician": {"model": "worker-a",
                                      "command": "/bin/echo {prompt}"},
                       "manual": {"model": "worker-a"},

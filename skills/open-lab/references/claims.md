@@ -73,17 +73,26 @@ of that move.
 - **Never chain a status change after an ingest in one command.** If the
   ingest is refused, the `claims.py set` behind it still fires. Run the
   ingest, read its verdict, then change status as a separate command.
+- **Every claim records the model that discovered it.** A claim allocated
+  at ingest carries the run's model; a claim the Director states carries
+  `director.model` from `lab.local.json`, and `claims.py new` refuses until
+  that is set. A discoverer recorded as a person's tag gave the gate below
+  nothing to compare, and one lab promoted 26 claims as "unknown".
 - **Verifying names its evidence and its ground.** `claims.py set verified`
   takes `--evidence R-NNN` and `--rests-on` (claim IDs, or `none`). The script
-  compares the evidence run's model against the discovering run's and records
-  the result on the claim — `full`, `partial (same provider)`, or, only with
-  `--accept-same-model`, `none`. Same-model checking is allowed, not
-  preferred, and always visible: the reference run promoted a claim on a
-  run by the very model that discovered it, and nothing showed it.
-- **When a claim falls, its dependents surface.** Refuting, superseding or
-  demoting prints every claim resting on it, transitively. State dependencies
-  at promotion, when the proof is fresh — the one dependency hunt done by
-  hand took four hours and missed one.
+  compares the evidence run's model against the claim's discovering model
+  and records the result on the claim — `full`, `partial (same provider)`,
+  or, only with `--accept-same-model`, `none`. There is no "unknown": a
+  claim or a run without a model on record is refused. Same-model checking
+  is allowed, not preferred, and always visible: the reference run promoted
+  a claim on a run by the very model that discovered it, and nothing showed
+  it.
+- **When a claim falls, its dependents fall with it.** Refuting, superseding
+  or demoting moves every verified claim resting on it, transitively, to
+  conditional on its return, with the reason on the ledger; a supersession
+  by a verified claim repoints them instead. Every claim still standing on
+  it is printed. State dependencies at promotion, when the proof is fresh —
+  the one dependency hunt done by hand took four hours and missed one.
 - **`refuted` and `superseded` are terminal.** Reviving an idea means a *new*
   claim, with a new ID, citing the old one. The old one stays where it is.
   Otherwise nobody can tell later which version of a claim an argument used.

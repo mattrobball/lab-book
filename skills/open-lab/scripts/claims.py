@@ -604,6 +604,7 @@ def fold(events):
             if want_new:
                 claims[cid] = {"id": cid, "status": rec["status"],
                                "discoverer": rec["actor"],
+                               "model": rec.get("model"),
                                "statement": rec["statement"],
                                "conditions": rec["conditions"],
                                "rests_on": rec["rests_on"], "hash": rec["hash"],
@@ -948,15 +949,33 @@ def check_citation(cid, target, evidence):
                    % (evidence, cid))
 
 
-def record_new(problem, statement, actor, tag=None, rests=(), conditions=""):
+def director_model(root):
+    """The model the Director runs on, from lab.local.json. Every claim the
+    Director states is discovered by that model, and the same-model gate
+    needs it: with the discoverer recorded as a person's tag the gate had
+    nothing to compare and let 26 promotions through as "unknown"."""
+    model = (local_config(root).get("director") or {}).get("model")
+    if not model:
+        refuse("lab.local.json does not say what model the Director runs on. "
+               "Put director: {\"model\": \"<model id>\"} in %s — a claim's "
+               "discoverer is a model, and the promotion gate compares it "
+               "with the checker's." % LOCAL_CONFIG)
+    return model
+
+
+def record_new(problem, statement, actor, tag=None, rests=(), conditions="",
+               model=None):
     """Allocate an ID and put the `new` event on the ledger. No commit: the
     caller commits, once, with everything else it recorded — an ingest that
     committed each claim as it went left claims on record with the run still
     open whenever it was interrupted, and the retry minted a second set."""
+    if not model:
+        refuse("a new claim needs the model that discovered it on record.")
     cid = allocate(problem, actor, tag)
     append(problem, {"event": "new", "id": cid, "ts": now(), "actor": actor,
-                     "status": "proposed", "statement": statement,
-                     "conditions": conditions, "rests_on": list(rests),
+                     "model": model, "status": "proposed",
+                     "statement": statement, "conditions": conditions,
+                     "rests_on": list(rests),
                      "hash": text_hash(statement, conditions)}, tag)
     return cid
 
@@ -990,7 +1009,8 @@ def cmd_new(args):
             print("Warning: this claim rests on %s, which is not a claim here "
                   "yet. `claims.py check` will keep flagging it." % r)
     statement, conditions = args.statement.strip(), (args.conditions or "").strip()
-    cid = record_new(problem, statement, actor, tag, rests, conditions)
+    cid = record_new(problem, statement, actor, tag, rests, conditions,
+                     director_model(git_root(problem)))
     if target != "proposed":
         # One command, one commit: a claim that is only ever a citation
         # should not need two, and the gap between them is where a claim
@@ -1075,26 +1095,34 @@ def cmd_set(args):
                    "--actor." % (cid, c["discoverer"], actor))
         ev_model = run_model(problem, evidence)
         disc_run = discovering_run(problem, cid)
-        disc_model = run_model(problem, disc_run) if disc_run else None
-        if ev_model and disc_model:
-            if ev_model == disc_model and not args.accept_same_model:
-                refuse("the evidence run %s ran on %s — the same model that "
-                       "discovered %s (%s). A model checking its own kind of "
-                       "mistake is weak evidence. Prefer a different model; to "
-                       "proceed anyway, pass --accept-same-model and the claim "
-                       "will record Independence: none." % (evidence, ev_model,
-                                                           cid, disc_run))
-            if ev_model == disc_model:
-                independence = "none (same model, %s)" % ev_model
-            elif provider(ev_model) == provider(disc_model):
-                independence = "partial (same provider: %s vs %s)" % (disc_model,
-                                                                     ev_model)
-                print("Warning: discoverer and checker share a provider "
-                      "(%s). Recorded as partial independence." % provider(ev_model))
-            else:
-                independence = "full (%s checked %s)" % (ev_model, disc_model)
+        disc_model = c.get("model") or (run_model(problem, disc_run)
+                                        if disc_run else None)
+        if not ev_model:
+            refuse("run %s records no model in its dispatch.json, so nothing "
+                   "says who checked %s. Only a run dispatched by run.py "
+                   "counts as evidence." % (evidence, cid))
+        if not disc_model:
+            refuse("%s records no discovering model, so the promotion gate "
+                   "cannot compare it with %s's. State the claim afresh with "
+                   "claims.py new (which stamps the Director's model) and "
+                   "supersede %s with it." % (cid, evidence, cid))
+        if ev_model == disc_model and not args.accept_same_model:
+            refuse("the evidence run %s ran on %s — the same model that "
+                   "discovered %s%s. A model checking its own kind of "
+                   "mistake is weak evidence. Prefer a different model; to "
+                   "proceed anyway, pass --accept-same-model and the claim "
+                   "will record Independence: none."
+                   % (evidence, ev_model, cid,
+                      " (%s)" % disc_run if disc_run else ""))
+        if ev_model == disc_model:
+            independence = "none (same model, %s)" % ev_model
+        elif provider(ev_model) == provider(disc_model):
+            independence = "partial (same provider: %s vs %s)" % (disc_model,
+                                                                 ev_model)
+            print("Warning: discoverer and checker share a provider "
+                  "(%s). Recorded as partial independence." % provider(ev_model))
         else:
-            independence = "unknown (models not on record)"
+            independence = "full (%s checked %s)" % (ev_model, disc_model)
         # A check run by another investigator is worth recording as such: a
         # second lab reaching the same result on its own machine is the
         # independence a second model cannot give.
