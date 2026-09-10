@@ -297,6 +297,23 @@ impossibility results are ordinary claims and untouched by this rule.
 
 ## Dispatching
 
+### The brief header
+
+A brief opens with a front-matter block between two `---` lines, one field
+per line: `kind`, `checks` (the run this one referees), `carry` (the claims
+the task is about, as IDs or ranges like `C-206..C-210`), `writes` (paths
+beyond the run directory, repo-relative), `budget` (`{memory_gb: N, hours:
+N}`). Dispatch reads it: `checks`, `writes` and `budget` stand in for
+`--checks`, `--allow`, `--memory-gb` and `--worker-timeout`, and a flag
+that disagrees with the header is refused rather than silently overridden.
+The carried claims are looked up in the ledger and written into the
+prompt under `## Claims carried` with the status they hold at that moment,
+so the Director never types a status by hand and a range never loses its
+interior. `claims_pasted` in dispatch.json is exactly that list; a claim
+mentioned in passing in the prose is not carried. Over forty carried claims
+draws a warning: the worker can read CLAIMS.md for the rest. A brief with
+no header behaves as before — every ID the prose mentions counts.
+
 Dispatch when you can state the goal and a worker with no context could tell
 whether it succeeded. Do not dispatch to save yourself reading, or a question
 you have not decided how to grade.

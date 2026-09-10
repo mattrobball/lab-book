@@ -1481,3 +1481,99 @@ class TestAtomicIngest(LabCase):
         self.assertEqual(self.ledger(), [])
         self.assertFalse((self.problem / "claims" / "_ids").exists())
         self.assertNotIn("ingested", self.log())
+
+
+class TestBriefHeader(LabCase):
+    """A brief may open with a front-matter block the harness reads: which
+    claims to carry, which run it checks, where it may write, its budget."""
+
+    def headed(self, header, body="Count the caps.", name="h.md"):
+        d = self.problem / "briefs"
+        d.mkdir(exist_ok=True)
+        p = d / name
+        p.write_text("---\n%s\n---\n# Brief: demo\n\n## Goal\n\n%s\n"
+                     % (header, body))
+        return p
+
+    def test_ranges_expand_in_every_form(self):
+        sys.path.insert(0, str(RUN.parent))
+        import run
+        self.assertEqual(
+            run.expand_claim_refs(["C-206..C-210", "C-521", "C-mrb-144–146",
+                                   "C-673-675", "C-001 through C-002",
+                                   "C-003 to C-003", "C-521"]),
+            ["C-206", "C-207", "C-208", "C-209", "C-210", "C-521", "C-mrb-144",
+             "C-mrb-145", "C-mrb-146", "C-673", "C-674", "C-675", "C-001",
+             "C-002", "C-003"])
+
+    def test_carried_claims_are_rendered_with_live_status(self):
+        c1 = self.claims_py("new", "--statement", "The bound is 9.",
+                            "--actor", "director")
+        c2 = self.claims_py("new", "--statement", "The bound is sharp.",
+                            "--actor", "director")
+        rid, r = self.dispatch(self.headed("kind: check\ncarry: [%s..%s]"
+                                           % (c1, c2)))
+        prompt = (self.problem / "runs" / rid / "PROMPT.md").read_text()
+        self.assertIn("## Claims carried", prompt)
+        self.assertIn("- %s [proposed] — The bound is 9." % c1, prompt)
+        self.assertIn("- %s [proposed] — The bound is sharp." % c2, prompt)
+        self.assertNotIn("---\nkind:", prompt)          # header is not prompt
+        d = self.dispatch_json(rid)
+        self.assertEqual(d["claims_pasted"], [c1, c2])
+        self.assertEqual(d["kind"], "check")
+        # a worker may cite what was carried, and only that
+        self.packet(rid, ret={"claims_used": [c2]})
+        self.ok("ingest", rid)
+
+    def test_prose_mentions_do_not_count_when_a_header_exists(self):
+        c1 = self.claims_py("new", "--statement", "The bound is 9.",
+                            "--actor", "director")
+        rid, _ = self.dispatch(self.headed("carry: []",
+                                           body="See %s for the bound." % c1))
+        self.assertEqual(self.dispatch_json(rid)["claims_pasted"], [])
+        self.packet(rid, ret={"claims_used": [c1]})
+        self.assertIn("never pasted", self.refused("ingest", rid))
+
+    def test_unknown_carried_claim_is_refused(self):
+        err = self.refused("new", "--brief", str(self.headed("carry: [C-404]")),
+                           "--no-launch", "--role", "manual")
+        self.assertIn("C-404", err)
+        self.assertIn("not in this problem's ledger", err)
+
+    def test_backwards_range_and_bad_field_are_refused(self):
+        err = self.refused("new", "--brief",
+                           str(self.headed("carry: [C-010..C-005]")),
+                           "--no-launch", "--role", "manual")
+        self.assertIn("runs backwards", err)
+        err = self.refused("new", "--brief", str(self.headed("colour: blue")),
+                           "--no-launch", "--role", "manual")
+        self.assertIn("not one of", err)
+
+    def test_header_sets_checks_writes_and_budget(self):
+        rid0, _ = self.dispatch()
+        self.packet(rid0)
+        self.ok("ingest", rid0)
+        (self.problem / "tools").mkdir()
+        brief = self.headed("checks: %s\nwrites: [problems/demo/tools]\n"
+                            "budget: {memory_gb: 10, hours: 4}" % rid0)
+        rid, _ = self.dispatch(brief, extra=["--model", "worker-b"])
+        d = self.dispatch_json(rid)
+        self.assertEqual(d["checks"], rid0)
+        self.assertIn("problems/demo/tools", d["allowed"])
+        self.assertEqual(d["limits"], {"worker_timeout": 14400,
+                                       "memory_gb": 10.0})
+
+    def test_header_and_flag_that_disagree_are_refused(self):
+        rid0, _ = self.dispatch()
+        self.packet(rid0)
+        self.ok("ingest", rid0)
+        brief = self.headed("budget: {hours: 4}")
+        err = self.refused("new", "--brief", str(brief), "--no-launch",
+                           "--role", "manual", "--worker-timeout", "600")
+        self.assertIn("--worker-timeout says 600", err)
+
+    def test_more_than_forty_carried_claims_warns(self):
+        ids = [self.claims_py("new", "--statement", "Claim number %d." % i,
+                              "--actor", "director") for i in range(41)]
+        _, r = self.dispatch(self.headed("carry: [%s..%s]" % (ids[0], ids[-1])))
+        self.assertIn("carries 41 claims", r.stdout)

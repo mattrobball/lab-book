@@ -1041,6 +1041,130 @@ def overdue_report(problem, skip=()):
 
 # ---------------------------------------------------------------- new
 
+# ---------------------------------------------------------------- brief header
+
+HEADER_KEYS = ("kind", "checks", "carry", "writes", "budget")
+BUDGET_KEYS = ("memory_gb", "hours")
+CARRY_WARN = 40
+# A claim reference in a header's carry list: one ID, or a range in any of
+# the forms briefs have used — C-206..C-210, C-206–C-210, C-206-C-210,
+# C-206 through C-210, C-206 to C-210, and C-673–680 with the prefix dropped
+# on the right. Namespaced IDs (C-mrb-144) work the same way.
+CLAIM_REF = re.compile(
+    r"^(C-(?:[a-z0-9][a-z0-9-]*-)?\d+)"
+    r"(?:\s*(?:\.\.|–|—|-|through|to)\s*(?:C-(?:[a-z0-9][a-z0-9-]*-)?)?(\d+))?$")
+
+
+def parse_header(text):
+    """The front-matter block at the top of a brief, and the body after it.
+    (None, text) when there is no block. The syntax is a small fixed subset
+    of YAML: `key: value`, `key: [a, b]`, `key: {k: v}`, one line each."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, text
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        refuse("the brief opens a header with --- and never closes it. Put a "
+               "second --- line after the last field.")
+    fields = {}
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line or line[0].isspace():
+            refuse("brief header line %r is not `key: value`. Each field is "
+                   "one line; lists go in [brackets], the budget in {braces}."
+                   % line)
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if key not in HEADER_KEYS:
+            refuse("brief header field %r is not one of %s."
+                   % (key, ", ".join(HEADER_KEYS)))
+        fields[key] = header_value(key, value)
+    body = "\n".join(lines[end + 1:]).lstrip("\n")
+    return fields, body
+
+
+def header_value(key, value):
+    if key in ("carry", "writes"):
+        if not (value.startswith("[") and value.endswith("]")):
+            refuse("brief header %s must be a list in brackets, like "
+                   "%s: [C-206..C-210, C-521]." % (key, key))
+        return [x.strip().strip("'\"") for x in value[1:-1].split(",") if x.strip()]
+    if key == "budget":
+        if not (value.startswith("{") and value.endswith("}")):
+            refuse("brief header budget must be in braces, like "
+                   "budget: {memory_gb: 10, hours: 4}.")
+        out = {}
+        for part in value[1:-1].split(","):
+            if not part.strip():
+                continue
+            k, _, v = part.partition(":")
+            k, v = k.strip(), v.strip()
+            if k not in BUDGET_KEYS:
+                refuse("brief header budget key %r is not one of %s."
+                       % (k, ", ".join(BUDGET_KEYS)))
+            try:
+                out[k] = float(v)
+            except ValueError:
+                refuse("brief header budget %s must be a number, not %r." % (k, v))
+        return out
+    return value.strip("'\"")
+
+
+def expand_claim_refs(refs):
+    """Every ID a list of references names, in order, ranges expanded."""
+    out = []
+    for ref in refs:
+        m = CLAIM_REF.match(ref.strip())
+        if not m:
+            refuse("%r in the brief header's carry list is not a claim ID or a "
+                   "range of them (C-206..C-210)." % ref)
+        first, last = m.group(1), m.group(2)
+        tag, lo = claims.id_parts(first)
+        if last is None and tag.isdigit():
+            # C-673-675: a range written with a plain hyphen, not an ID
+            # in the namespace "673" — no investigator tag is all digits.
+            tag, lo, last = "", int(tag), str(lo)
+        if last is None:
+            out.append(first)
+            continue
+        hi = int(last)
+        if hi < lo:
+            refuse("the range %r in the brief header runs backwards." % ref)
+        out += [make_id("C", tag, n) for n in range(lo, hi + 1)]
+    seen, unique = set(), []
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+def render_carried(problem, ids):
+    """The Context carried block the harness writes for the worker: each
+    claim with the status the ledger holds at this moment, and its text.
+    The Director stops typing statuses by hand, so they cannot be stale."""
+    known, _ = claims.load(problem)
+    missing = [c for c in ids if c not in known]
+    if missing:
+        refuse("the brief header carries %s, which %s not in this problem's "
+               "ledger. Carry only claims on file; state a new one with "
+               "claims.py new first." % (", ".join(missing),
+                                          "is" if len(missing) == 1 else "are"))
+    lines = ["## Claims carried", "",
+             "Written by the harness at dispatch from the ledger. Cite these "
+             "IDs in `claims_used`; treat anything not marked verified as not "
+             "settled here.", ""]
+    for c in ids:
+        k = known[c]
+        line = "- %s [%s] — %s" % (c, k["status"], k["statement"].strip())
+        if k.get("conditions"):
+            line += " (conditions: %s)" % k["conditions"].strip()
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 def cmd_new(args):
     problem = find_problem(args.problem)
     root = git_root(problem)
@@ -1052,6 +1176,40 @@ def cmd_new(args):
         refuse("there is no brief at %s. Write one from templates/BRIEF.md and "
                "pass its path to --brief." % args.brief)
     text = brief.read_text()
+    header, body = parse_header(text)
+    header = header or {}
+    if header.get("checks"):
+        if args.checks and args.checks != header["checks"]:
+            refuse("the brief header says checks: %s but --checks says %s. "
+                   "One of them is wrong; fix it and dispatch again."
+                   % (header["checks"], args.checks))
+        args.checks = header["checks"]
+    if header.get("budget"):
+        b = header["budget"]
+        if "memory_gb" in b:
+            if args.memory_gb and args.memory_gb != b["memory_gb"]:
+                refuse("the brief header budgets %s GB but --memory-gb says %s."
+                       % (b["memory_gb"], args.memory_gb))
+            args.memory_gb = b["memory_gb"]
+        if "hours" in b:
+            secs = int(b["hours"] * 3600)
+            if args.worker_timeout and args.worker_timeout != secs:
+                refuse("the brief header budgets %s h (%s s) but "
+                       "--worker-timeout says %s s." % (b["hours"], secs,
+                                                        args.worker_timeout))
+            args.worker_timeout = secs
+    if header.get("writes"):
+        # Header paths are repo-relative, wherever the Director runs from.
+        extra = [str(root / w) if not Path(w).is_absolute() else w
+                 for w in header["writes"]]
+        args.allow = list(args.allow or []) + [w for w in extra
+                                                if w not in (args.allow or [])]
+    carried = expand_claim_refs(header["carry"]) if "carry" in header else None
+    carried_block = render_carried(problem, carried) if carried else ""
+    if carried and len(carried) > CARRY_WARN:
+        print("Warning: this brief carries %d claims. More context measurably "
+              "hurts a worker; the whole ledger is in CLAIMS.md for it to "
+              "read. Carry what the task is about." % len(carried))
     role = lab_config(root).get("roles", {}).get(args.role, {})
     model = args.model or role.get("model")
     duplicate_of = None
@@ -1154,13 +1312,19 @@ def cmd_new(args):
         "# Worker charter\n\nThese rules bind this run. Nothing outside this "
         "directory does.\n\n" + charter)
     (rundir / "PROMPT.md").write_text(
-        "# Run %s\n\n%s\n---\n\n# The brief\n\n%s\n" % (rid, charter, text.strip()))
+        "# Run %s\n\n%s\n---\n\n# The brief\n\n%s\n%s"
+        % (rid, charter, body.strip(),
+           "\n" + carried_block if carried_block else ""))
     dispatch = {
         "run": rid, "ts": now(), "status": "open", "actor": args.actor or model,
         "model": model, "role": args.role, "brief": rel(brief, root) or str(brief),
         "brief_sha": hashlib.sha256(text.encode()).hexdigest(),
         "brief_fingerprint": fp,
-        "claims_pasted": sorted(set(CLAIM_ID.findall(text)), key=id_key),
+        # With a header, the carried list is the whole truth; without one,
+        # every ID the prose mentions, as before.
+        "claims_pasted": (sorted(carried, key=id_key) if carried is not None
+                          else sorted(set(CLAIM_ID.findall(text)), key=id_key)),
+        "kind": header.get("kind"),
         "checks": args.checks, "duplicates": args.duplicates,
         "investigator": tag, "host": host(),
         "director_session": director_session(),

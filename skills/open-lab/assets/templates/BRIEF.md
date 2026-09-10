@@ -1,8 +1,11 @@
+---
+kind: <construct | check | refute | measure | survey>
+checks: <R-NNN — only for a check of another run; otherwise drop this line>
+carry: [<C-NNN, C-NNN..C-NNN — the claims this task is about, by ID; ranges allowed>]
+writes: [<repo-relative paths beyond the run directory this worker may modify; [] if none>]
+budget: {memory_gb: <N>, hours: <N>}
+---
 # Brief: <short title>
-
-## Kind
-
-<construct | check | refute | measure | survey>
 
 ## Goal
 
@@ -23,10 +26,12 @@ was refereed.>
 
 ## Context carried
 
-<What the worker may rely on, pasted in here — not referenced. The minimum it
-needs, not everything you have: more context measurably hurts a worker. Paste
-each claim with its status attached — `C-NNN [verified] — statement` — and mark
-anything not verified as "not settled here". The file contents it needs, or
+<What the worker may rely on beyond the claims. The claims themselves go in
+the header's `carry` list: at dispatch the harness looks each one up and
+writes it into the prompt with its current status and text, so never paste
+claim text or statuses by hand, and never list the whole ledger — the worker
+can read CLAIMS.md. The minimum it needs, not everything you have: more
+context measurably hurts a worker. The file contents it needs, or
 leave to read `tools/`. Anything a previous run got wrong and how it was
 corrected. Mark each item "do not re-derive".>
 
