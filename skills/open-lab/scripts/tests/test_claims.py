@@ -101,11 +101,11 @@ class TestAllocation(LabCase):
         first = self.new("Method A terminates on every input.")
         self.assertEqual(first, "C-001")
         # Simulate a racing allocator that won the O_EXCL create for C-002.
-        marker = self.problem / "claims" / "_ids" / "C-002"
+        marker = self.root / "ids" / "C-002"
         os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         second = self.new("Method B terminates on every input.")
         self.assertEqual(second, "C-003")
-        ids = sorted(p.name for p in (self.problem / "claims" / "_ids").iterdir())
+        ids = sorted(p.name for p in (self.root / "ids").iterdir() if p.name.startswith("C-"))
         self.assertEqual(ids, ["C-001", "C-002", "C-003"])
         self.assertEqual(len(ids), len(set(ids)))
 

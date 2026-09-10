@@ -1485,8 +1485,8 @@ class TestAtomicIngest(LabCase):
                  "statement": "The bound is 9.", "conditions": "",
                  "rests_on": [], "hash": "h"}
         (self.problem / "claims" / "ledger.jsonl").write_text(json.dumps(stale) + "\n")
-        (self.problem / "claims" / "_ids").mkdir()
-        (self.problem / "claims" / "_ids" / "C-001").write_text("stale\n")
+        (self.root / "ids").mkdir(exist_ok=True)
+        (self.root / "ids" / "C-001").write_text("stale\n")
         entries = self.problem / "notebook" / "entries"
         entries.mkdir(parents=True)
         (entries / "N-20260902-01-stale.md").write_text("# stale\n")
@@ -1502,7 +1502,7 @@ class TestAtomicIngest(LabCase):
         (self.problem / "rogue.txt").write_text("outside the fence\n")
         self.refused("ingest", rid)
         self.assertEqual(self.ledger(), [])
-        self.assertFalse((self.problem / "claims" / "_ids").exists())
+        self.assertFalse((self.root / "ids" / "C-001").exists())
         self.assertNotIn("ingested", self.log())
 
 
@@ -1705,3 +1705,47 @@ class TestTranscriptDiscovery(TestTranscripts):
         rid2, _ = self.dispatch(self.brief("Again.", "b2.md"))
         self.packet(rid2)
         self.assertNotIn("transcript", self.ok("ingest", rid2).stdout.lower())
+
+
+class TestLabWideIds(LabCase):
+    """One counter per kind for the whole lab: an ID names one thing."""
+
+    def second_problem(self):
+        p = self.root / "problems" / "other"
+        (p / "claims").mkdir(parents=True)
+        (p / "README.md").write_text("# other\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "second problem")
+        return p
+
+    def test_runs_and_claims_number_across_problems(self):
+        other = self.second_problem()
+        r1, _ = self.dispatch()
+        r2 = self.ok("new", "--brief", str(self.brief(name="o.md")),
+                     "--no-launch", "--role", "manual", cwd=other).stdout.split()[0]
+        self.assertEqual((r1, r2), ("R-001", "R-002"))
+        c1 = self.claims_py("new", "--statement", "One.", "--actor", "d")
+        c2 = self.claims_py("new", "--statement", "Two.", "--actor", "d", cwd=other)
+        self.assertEqual((c1, c2), ("C-001", "C-002"))
+        sys.path.insert(0, str(RUN.parent))
+        import claims
+        self.assertEqual(claims.problem_of(self.root, "R-002").resolve(), other.resolve())
+        self.assertEqual(claims.problem_of(self.root, "C-001").resolve(),
+                         self.problem.resolve())
+        self.assertIsNone(claims.problem_of(self.root, "C-009"))
+        self.assertEqual(git(self.root, "status", "--short").stdout.strip(), "")
+
+    def test_breaches_are_on_the_resources_line_and_in_catchup(self):
+        rid, _ = self.dispatch()
+        self.packet(rid)
+        (self.problem / "runs" / rid / "execution.json").write_text(json.dumps(
+            {"run": rid, "start": "2026-09-01T00:00:00Z", "end": "2026-09-01T01:00:00Z",
+             "exit": 0, "wall_seconds": 3600,
+             "breaches": [{"kind": "memory", "limit": 16, "seen": 108.2,
+                           "unit": "GB", "at": "2026-09-01T00:30:00Z"}]}))
+        r = self.ok("ingest", rid)
+        entry = (self.problem / "notebook" / "entries" / self.entries()[0]).read_text()
+        self.assertIn("OVER memory BUDGET: 108.2 GB seen, limit 16", entry)
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("went over a budget", out.split("Attention:")[1])
+        self.assertIn("nothing was killed", out)

@@ -566,23 +566,14 @@ def run_dir(problem, rid):
 
 
 def allocate_run(problem, tag=None):
-    """Take the next free run ID in the caller's own namespace. mkdir is
-    atomic: two dispatchers racing here cannot both take the ID, and two
-    investigators on two machines never reach for the same one at all."""
+    """The next free run ID in the caller's own namespace, lab-wide: one
+    counter for every problem, so R-052 names one run wherever it is
+    cited (six runs were once called R-001 in one lab)."""
     d = problem / "runs"
     d.mkdir(parents=True, exist_ok=True)
-    mine = tag or ""
-    taken = [parts[1] for parts in (id_tag_parts(p.name) for p in d.iterdir())
-             if parts and parts[0] == mine]
-    n = max(taken) if taken else 0
-    while True:
-        n += 1
-        rid = make_id("R", mine, n)
-        try:
-            (d / rid).mkdir()
-        except FileExistsError:
-            continue
-        return rid
+    rid = claims.take_id(problem, "R", "dispatch", tag)
+    (d / rid).mkdir()
+    return rid
 
 
 def id_tag_parts(name):
@@ -785,6 +776,9 @@ def resource_line(problem, rid):
         bits.append("%dm%02ds wall" % divmod(e["wall_seconds"], 60))
     for k, v in sorted((e.get("usage") or {}).items()):
         bits.append("%s %s" % (v, k))
+    for b in e.get("breaches") or []:
+        bits.append("OVER %s BUDGET: %s %s seen, limit %s"
+                    % (b["kind"], b["seen"], b["unit"], b["limit"]))
     t = (ingest_record(problem, rid) or {}).get("transcript") or {}
     if t.get("usage"):
         u = t["usage"]
@@ -1480,7 +1474,7 @@ def cmd_new(args):
             "{prompt}", "%s/PROMPT.md" % rundir_rel) or None,
     }
     write_json(rundir / "dispatch.json", dispatch)
-    commit(root, [rundir_rel, rel(brief, root), ".gitignore"],
+    commit(root, [rundir_rel, rel(brief, root), ".gitignore", claims.IDS_DIR],
            "%s dispatched to %s" % (rid, model))
     print("%s — model %s, timeout %ss, may write: %s"
           % (rid, model, args.timeout, ", ".join(allowed)))
@@ -1780,10 +1774,10 @@ def discard_half_ingest(problem, root, rid):
         git(root, "checkout", "HEAD", "--", prel + "/claims", prel + "/runs")
     stray = git_out(root, "ls-files", "--others", "--exclude-standard", "--",
                     prel + "/claims", prel + "/notebook/entries",
-                    prel + "/runs/%s/ingest.json" % rid)
+                    prel + "/runs/%s/ingest.json" % rid, claims.IDS_DIR)
     for line in stray.splitlines():
         p = root / line.strip()
-        if p.is_file() and (p.parent.name in ("_ids", "entries") or
+        if p.is_file() and (p.parent.name in (claims.IDS_DIR, "entries") or
                             p.name.endswith(".jsonl") or
                             p.name == "ingest.json" or
                             p.parent.name == "claims"):
@@ -2056,7 +2050,8 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
     paths += [rel(run_dir(problem, t), root) for t in touched]
     if allocated:
         claims.regenerate(problem)
-        paths += [rel(problem / "claims", root), rel(problem / "CLAIMS.md", root)]
+        paths += [rel(problem / "claims", root), rel(problem / "CLAIMS.md", root),
+                  claims.IDS_DIR]
     message = "%s ingested: %s — %s" % (rid, verdict, ret["headline"])
     if allocated:
         message += "\n\n" + "\n".join("%s new (proposed): %s"
@@ -2460,6 +2455,20 @@ def catchup_lints(problem, root=None):
         lines += ["  " + x for x in dupes[:8]]
         if len(dupes) > 8:
             lines.append("  ... and %d more" % (len(dupes) - 8))
+
+    breached = []
+    for rid, d in runs:
+        e = execution_record(problem, rid)
+        for b in (e or {}).get("breaches") or []:
+            breached.append("%s %s %s %s (limit %s)%s"
+                            % (rid, b["kind"], b["seen"], b["unit"], b["limit"],
+                               "" if e.get("end") else ", still running"))
+    if breached:
+        lines.append("%d run(s) went over a budget — advisory, nothing was "
+                     "killed; the Investigator decides what a breach means "
+                     "for the result: %s"
+                     % (len(breached), "; ".join(breached[:6])
+                        + ("; …" if len(breached) > 6 else "")))
 
     thin, unruled = [], {}
     for rid, d in runs:

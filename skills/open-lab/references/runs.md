@@ -163,7 +163,8 @@ again and it only checks the branch out; it refuses when the tag is already
 somebody else's, because two people sharing a tag share their IDs.
 
 From then on that clone allocates in its own namespace — `R-<tag>-001`,
-`C-<tag>-001` — writes claim events to its own `claims/ledger-<tag>.jsonl`,
+`C-<tag>-001`, one counter per kind for the whole lab, never per problem —
+writes claim events to its own `claims/ledger-<tag>.jsonl`,
 and refuses `new`, `ingest`, `void`, `note`, `waive-review` and every
 `claims.py` write on any other branch, printing the command that fixes it.
 Read-only commands work anywhere. IDs allocated before the first join keep

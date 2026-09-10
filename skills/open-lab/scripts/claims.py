@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Claim ledger for one problem.
 
-Per problem: the ledgers under claims/ are the only truth, claims/_ids/ holds
-one marker file per allocated ID, and C-NNN.md plus CLAIMS.md are views
-rebuilt from them. Every state change is committed, because git is the layer
+Per problem: the ledgers under claims/ are the only truth, and C-NNN.md plus
+CLAIMS.md are views rebuilt from them. IDs are the lab's, not the problem's:
+ids/ at the top of the lab holds one marker file per allocated run or claim
+ID, naming the problem it belongs to, so R-052 means one run and C-215 one
+claim across every problem. Every state change is committed, because git is the layer
 that makes tampering visible.
 
 One investigator writes one ledger — `claims/ledger-<tag>.jsonl`, with the
@@ -664,32 +666,58 @@ def append(problem, rec, tag=None):
         fh.write(json.dumps(rec, sort_keys=True) + "\n")
 
 
-def allocate(problem, actor, tag=None):
-    """Take the next free ID in the caller's own namespace. O_EXCL means two
-    allocators racing here can never walk away with the same one: the loser
-    of the creation moves on. Namespaces are what stop two investigators
-    minting the same ID on two machines and someone renumbering evidence by
-    hand afterwards."""
-    ids = Path(problem) / "claims" / "_ids"
+IDS_DIR = "ids"
+
+
+def take_id(problem, kind, actor, tag=None):
+    """The next free ID of a kind in the caller's own namespace, across the
+    whole lab. O_EXCL means two allocators racing here can never walk away
+    with the same one: the loser of the creation moves on. Namespaces are
+    what stop two investigators minting the same ID on two machines. The
+    marker names the problem, so a bare ID can be followed back from
+    anywhere in the lab."""
+    root = cached_root(problem)
+    if root is None:
+        refuse("%s is not inside a git repository; IDs are allocated at the "
+               "top of the lab." % problem)
+    ids = root / IDS_DIR
     ids.mkdir(parents=True, exist_ok=True)
     mine = tag or ""
-    claims, _ = load(problem)
     taken = []
-    for name in [p.name for p in ids.iterdir()] + list(claims):
-        parts = id_parts(name) if str(name).startswith("C-") else None
+    for p in ids.iterdir():
+        parts = id_parts(p.name) if p.name.startswith(kind + "-") else None
         if parts and parts[0] == mine:
             taken.append(parts[1])
     n = max(taken) if taken else 0
+    try:
+        prel = str(Path(problem).resolve().relative_to(root.resolve()))
+    except ValueError:
+        prel = str(problem)
     while True:
         n += 1
-        cid = make_id("C", mine, n)
+        ident = make_id(kind, mine, n)
         try:
-            fd = os.open(str(ids / cid), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(str(ids / ident), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             continue
         with os.fdopen(fd, "w") as fh:
-            fh.write("%s %s\n" % (now(), actor))
-        return cid
+            fh.write("%s %s %s\n" % (now(), actor, prel))
+        return ident
+
+
+def allocate(problem, actor, tag=None):
+    return take_id(problem, "C", actor, tag)
+
+
+def problem_of(root, ident):
+    """The problem directory an ID belongs to, from its marker; None when
+    no marker is on file."""
+    p = Path(root) / IDS_DIR / ident
+    try:
+        rel = p.read_text().split()[2]
+    except (OSError, IndexError):
+        return None
+    return Path(root) / rel
 
 
 # ---------------------------------------------------------------- views
@@ -764,7 +792,11 @@ def regenerate(problem):
 def commit(problem, message):
     root = git_root(problem)
     paths = [str((problem / "claims").relative_to(root)),
-             str((problem / "CLAIMS.md").relative_to(root))]
+             str((problem / "CLAIMS.md").relative_to(root)), IDS_DIR]
+    # A path git knows nothing about yet and that is not on disk either
+    # would fail the whole commit as a bad pathspec.
+    paths = [p for p in paths if (root / p).exists() or
+             git(root, "ls-files", "--error-unmatch", "--", p).returncode == 0]
     forget_committed()
     git(root, "add", "--", *paths)
     r = git(root, "commit", "-m", message, "--", *paths)

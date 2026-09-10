@@ -278,7 +278,7 @@ class TestNamespacedIds(FederationCase):
                          ["C-bob-001"])
         self.assertTrue((self.problem(self.alice) / "claims" /
                          "ledger-alice.jsonl").exists())
-        self.assertTrue((self.problem(self.alice) / "claims" / "_ids" /
+        self.assertTrue((self.alice / "ids" /
                          "C-alice-001").exists())
         self.assertIn("C-alice-001",
                       (self.problem(self.alice) / "CLAIMS.md").read_text())

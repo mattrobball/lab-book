@@ -57,6 +57,11 @@ of that move.
 
 ## The hard rules
 
+- **IDs are the lab's, one counter per kind.** `R-052` names one run and
+  `C-215` one claim across every problem; the marker under `ids/` at the
+  top of the lab says which problem each belongs to, so a bare ID can be
+  followed back from anywhere. Six runs were once called R-001 in one lab
+  and no commit subject could say which.
 - **IDs come only from `claims.py`.** Never write a new ID by hand. Workers
   never allocate at all — they propose claims as plain sentences, and the ID is
   allocated when their run is ingested.
