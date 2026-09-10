@@ -56,6 +56,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -801,6 +802,7 @@ TRANSCRIPT_NAME = "session.jsonl.gz"
 # The size at which hosts start warning about a file in the history.
 DEFAULT_COMMIT_MAX_MB = 50
 TRANSCRIPT_GRACE = 120          # a session file is flushed a moment late
+DEFAULT_WORKER_TIMEOUT = 4 * 3600   # advisory; a maths run is hours, not minutes
 DEFAULT_MAX_MB = 20
 
 
@@ -1141,7 +1143,7 @@ def watch(proc, execution, path, t0, limits):
             breach["at"] = now()
             execution.setdefault("breaches", []).append(breach)
             changed = True
-            print("%s is over its %s budget: %s %s seen, limit %s. It has not "
+            say("%s is over its %s budget: %s %s seen, limit %s. It has not "
                   "been touched — the Investigator decides: `kill %s`, or let "
                   "it run." % (execution["run"], breach["kind"], breach["seen"],
                                breach["unit"], breach["limit"], proc.pid))
@@ -1413,7 +1415,8 @@ def cmd_new(args):
                "--no-launch, or dispatch under a role with no command."
                % (args.role, role["command"]))
 
-    limits = {"worker_timeout": args.worker_timeout or role.get("worker_timeout"),
+    limits = {"worker_timeout": (args.worker_timeout or role.get("worker_timeout")
+                                 or DEFAULT_WORKER_TIMEOUT),
               "memory_gb": args.memory_gb or role.get("memory_gb")}
 
     fp = fingerprint(text)
@@ -1428,19 +1431,23 @@ def cmd_new(args):
             print("Warning: %s is still open and carries the same brief; "
                   "dispatching anyway on --force." % rid)
 
-    before, position = dirty(root), head(root)
-    rid = allocate_run(problem, tag)
-    rundir = run_dir(problem, rid)
-    rundir_rel = rel(rundir, root)
-    allowed = [rundir_rel]
+    extra_allowed = []
     for a in args.allow or []:
         r = rel(Path(a), root)
         if r is None:
             refuse("--allow %s is outside this repository, and a fence that "
                    "points out of the lab cannot be checked. Name a path "
                    "inside %s." % (a, root))
-        if r not in allowed:
-            allowed.append(r)
+        if r not in extra_allowed:
+            extra_allowed.append(r)
+
+    # Every check is behind us: only now is a number taken. A refusal
+    # after allocation left empty run directories and burned their numbers.
+    before, position = dirty(root), head(root)
+    rid = allocate_run(problem, tag)
+    rundir = run_dir(problem, rid)
+    rundir_rel = rel(rundir, root)
+    allowed = [rundir_rel] + [a for a in extra_allowed if a != rundir_rel]
 
     (rundir / "packet").mkdir(parents=True, exist_ok=True)
     (rundir / "BRIEF.md").write_text(text)
@@ -1572,7 +1579,19 @@ def worker_environment(role, source=None):
     return env
 
 
+def say(text):
+    """Print that survives a closed stdout. `run.py new | head` once sent
+    SIGPIPE to the dispatcher mid-worker; with the signal ignored the
+    print raises instead, and the watcher must not die of a print."""
+    try:
+        print(text)
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def launch_and_watch(argv, rundir, log, execution, limits, role, rid, rundir_rel):
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     t0 = time.time()
     with open(log, "wb") as fh:           # a worker that dies at its API says
         env = worker_environment(role)
@@ -1589,7 +1608,7 @@ def launch_and_watch(argv, rundir, log, execution, limits, role, rid, rundir_rel
         execution["usage"] = usage
     write_json(rundir / "execution.json", execution)
     size = log.stat().st_size
-    print("Worker exited %d after %ds, %d byte(s) in %s/worker.log.%s Ingest "
+    say("Worker exited %d after %ds, %d byte(s) in %s/worker.log.%s Ingest "
           "with `run.py ingest %s`."
           % (code, execution["wall_seconds"], size, rundir_rel,
              "" if size else " It printed nothing at all, which usually means "
@@ -1680,6 +1699,9 @@ def read_packet(problem, rid, d):
                "by hand). %s" % (rid, ret["validation"], tail))
     for key in ("exits", "machine_markers", "claims_used", "claims_proposed"):
         strings(ret, key, rid)
+    if isinstance(ret.get("reviewed"), str):
+        # "R-053" where ["R-053"] was meant: one run, not five characters.
+        ret["reviewed"] = [ret["reviewed"]]
     for s in ret["claims_proposed"]:
         hit = CLAIM_ID.search(s)
         if hit:

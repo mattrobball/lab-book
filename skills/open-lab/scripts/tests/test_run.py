@@ -1816,3 +1816,19 @@ class TestStepsOf(LabCase):
                               "steps_of": {"C-099": [0]}})
         self.assertIn("not in claims_used", self.refused("ingest", rid))
         self.assertEqual(len(self.ledger()), 4)                  # nothing new
+
+
+class TestSmallGates(LabCase):
+    def test_refused_dispatch_takes_no_number(self):
+        err = self.refused("new", "--brief", str(self.brief()), "--no-launch",
+                           "--role", "manual", "--allow", "/tmp/elsewhere")
+        self.assertIn("outside this repository", err)
+        self.assertFalse((self.problem / "runs").exists() and
+                         any((self.problem / "runs").iterdir()))
+        self.assertFalse((self.root / "ids").exists())
+        rid, _ = self.dispatch()
+        self.assertEqual(rid, "R-001")
+
+    def test_worker_timeout_defaults_to_four_hours(self):
+        rid, _ = self.dispatch()
+        self.assertEqual(self.dispatch_json(rid)["limits"]["worker_timeout"], 14400)

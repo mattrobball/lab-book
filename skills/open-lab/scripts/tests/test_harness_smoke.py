@@ -133,16 +133,11 @@ class PacketGateTests(unittest.TestCase):
             run.apply_reviews(self.problem, "R-008", {"reviewed": ["R-007"]},
                               "PASS", "Model-A")
 
-    @unittest.expectedFailure
-    def test_reviewed_as_a_bare_string_is_accepted(self):
-        # HARNESS_ISSUES.md 2026-09-03: a string is iterated character by
-        # character and refused with a confusing message.
-        make_run(self.problem, "R-009", GOOD_RESULT, GOOD_RET)
-        (self.problem / "runs" / "R-009" / "ingest.json").write_text(
-            json.dumps({"run": "R-009", "actor": "model-a"}))
-        notes, touched = run.apply_reviews(
-            self.problem, "R-010", {"reviewed": "R-009"}, "PASS", "model-b")
-        self.assertEqual(touched, ["R-009"])
+    def test_reviewed_as_a_bare_string_is_read_as_one_run(self):
+        # "R-009" was once iterated letter by letter and refused.
+        make_run(self.problem, "R-009", GOOD_RESULT, dict(GOOD_RET, reviewed="R-009"))
+        verdict, secs, ret = run.read_packet(self.problem, "R-009", self.dispatch)
+        self.assertEqual(ret["reviewed"], ["R-009"])
 
     def test_already_ingested_run_is_refused(self):
         # R-038 was ingested twice on 2026-09-02. load_dispatch refuses any
