@@ -233,16 +233,44 @@ def joined(root):
 
 
 def git_user(root):
-    return git_out(root, "config", "user.name")
+    """Who the record says this investigator is. The lab's own settings
+    answer first, then the LAB_INVESTIGATOR variable, then git; an identity
+    on the record is a fact about the lab, not about this machine's git.
+    With none of the three set and a person at the terminal, ask once and
+    keep the answer in lab.local.json — one lab could not be joined at all
+    because git user.name was unset and the Investigator would not set it."""
+    cfg = local_config(root)
+    name = (cfg.get("investigator") or {}).get("name")
+    if name:
+        return name
+    if os.environ.get("LAB_INVESTIGATOR"):
+        return os.environ["LAB_INVESTIGATOR"]
+    name = git_out(root, "config", "user.name")
+    if name or not sys.stdin.isatty():
+        return name
+    try:
+        name = input("Your name, as the record should show it: ").strip()
+    except EOFError:
+        return ""
+    if name:
+        cfg["investigator"] = dict(cfg.get("investigator") or {}, name=name)
+        write_config(Path(root) / LOCAL_CONFIG, cfg)
+        print("Kept in %s as investigator.name; it never leaves this machine."
+              % LOCAL_CONFIG)
+    return name
 
 
 def own_tag(root):
     """The caller's tag, from git's own idea of who they are."""
+    given = (local_config(root).get("investigator") or {}).get("tag")
+    if given:
+        return slug(str(given))
     name = git_user(root)
     if not name:
-        refuse("git has no user.name here, and an investigator's tag is made "
-               "from their name. Set one — `git config user.name \"Your "
-               "Name\"` — then run the same command again.")
+        refuse("nothing here says who you are, and an investigator's tag is "
+               "made from their name. Put investigator: {\"name\": \"Your "
+               "Name\"} in %s, or set git user.name, then run the same command "
+               "again." % LOCAL_CONFIG)
     tag = slug(name)
     if not tag:
         refuse("git user.name is %r, which leaves no letters or digits to make "

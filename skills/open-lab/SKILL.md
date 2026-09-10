@@ -62,8 +62,9 @@ lab" section if there is one, and ask them to say they will work under them:
 two people holding two standards of proof produce two kinds of result and
 find out at the paper. If they disagree, do not talk them round and do not
 change the rule on the spot — file the disagreement as a `run.py note` and
-put it on the next meeting's agenda. Then check git's `user.name` is their
-real name (their tag is made from it) and run `run.py join`, which registers
+put it on the next meeting's agenda. Then run `run.py join`, which asks
+their name if nothing on this machine says it (their tag is made from it,
+and the answer is kept in `lab.local.json`), registers
 them and puts them on their own branch. Then discover the environment on
 *this* machine — their models, launch commands and tools — and write
 `lab.local.json` from what they confirm; it is never committed, and the
@@ -113,8 +114,10 @@ Then scaffold the lab repository:
    takes what the group owns: `kit_version` from this SKILL.md's
    `metadata.version`, the caps, and `policy`, the standing rules in plain
    sentences that anyone joining later is read.
-4. `run.py join`. It registers this Investigator in `lab.json` from git's
-   `user.name`, creates their branch `lab/<tag>`, writes a `.gitignore` for
+4. `run.py join`. It registers this Investigator in `lab.json` by name —
+   `investigator.name` in `lab.local.json`, asked for at the terminal if
+   unset, with git's `user.name` as the fallback — creates their branch
+   `lab/<tag>`, writes a `.gitignore` for
    byte-compiled files, and commits — in a fresh lab that is the first
    commit. Everything after it is recorded on that branch, and a second
    investigator joining later needs nothing else to start.

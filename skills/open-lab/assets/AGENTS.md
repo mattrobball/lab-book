@@ -177,7 +177,7 @@ across repositories is a citation, never a dependency.
 ## This Investigator
 
 <!-- Filled at intake from question 6, in the Investigator's own words; one
-     block per person, named by git user.name. Binding on every session.
+     block per person, named by their investigator name. Binding on every session.
      Replaced, never appended, when they ask to be talked to differently;
      the change is filed as a note. -->
 

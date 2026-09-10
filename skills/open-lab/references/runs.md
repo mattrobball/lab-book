@@ -153,8 +153,11 @@ cloned a lab others started, the Director gives them catchup first — it is
 read-only and needs no join — then asks whether they mean to contribute;
 if so it runs `join`, asks only the sixth intake question, and files their
 `## This Investigator` block on their branch (`SKILL.md`, "Am I in a lab
-already?"). It makes a **tag** from git's `user.name` (lowercase, letters and
-digits, at most twelve), registers the person in `lab.json` under
+already?"). It makes a **tag** from the investigator's name (lowercase,
+letters and digits, at most twelve) — `investigator.name` in
+`lab.local.json`, asked for once at the terminal when nothing sets it, the
+`LAB_INVESTIGATOR` variable or git's `user.name` otherwise; an explicit
+`investigator.tag` there wins — registers the person in `lab.json` under
 `investigators`, creates the branch `lab/<tag>`, and checks it out. Run it
 again and it only checks the branch out; it refuses when the tag is already
 somebody else's, because two people sharing a tag share their IDs.
