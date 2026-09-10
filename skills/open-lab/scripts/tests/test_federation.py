@@ -74,7 +74,7 @@ class FederationCase(unittest.TestCase):
     def script(self, path, clone, *args, cwd=None):
         return subprocess.run([sys.executable, str(path)] + list(args),
                               cwd=str(cwd or self.problem(clone)),
-                              capture_output=True, text=True, env=dict(os.environ))
+                              capture_output=True, text=True, env=dict(os.environ), stdin=subprocess.DEVNULL)
 
     def run_py(self, clone, *args, **kw):
         return self.script(RUN, clone, *args, **kw)

@@ -59,6 +59,7 @@ class LabCase(unittest.TestCase):
     def script(self, path, *args, cwd=None, env=None):
         return subprocess.run([sys.executable, str(path)] + list(args),
                               cwd=str(cwd or self.problem), capture_output=True,
+                              stdin=subprocess.DEVNULL,
                               text=True, env=dict(os.environ, **(env or {})))
 
     def run_py(self, *args, **kw):
@@ -425,7 +426,13 @@ class TestHonestyTier(LabCase):
         r = self.ok("ingest", rid)
         self.assertIn("replayed: no", r.stdout)
         self.assertIn("never printed", r.stdout)
-        self.assertIs(self.ingest_json(rid)["replayed"], False)
+        rec = self.ingest_json(rid)
+        self.assertIs(rec["replayed"], False)
+        # a PASS that does not replay is filed UNDECIDED, the PASS kept aside
+        self.assertEqual(rec["verdict"], "UNDECIDED")
+        self.assertEqual(rec["worker_verdict"], "PASS")
+        self.assertEqual(self.dispatch_json(rid)["verdict"], "UNDECIDED")
+        self.assertIn("UNDECIDED", self.log().splitlines()[0])
 
     def test_nonzero_exit_is_asserted_even_with_markers(self):
         rid, _ = self.dispatch()
@@ -433,6 +440,20 @@ class TestHonestyTier(LabCase):
         r = self.ok("ingest", rid)
         self.assertIn("exited 3", r.stdout)
         self.assertIs(self.ingest_json(rid)["replayed"], False)
+        self.assertEqual(self.ingest_json(rid)["verdict"], "UNDECIDED")
+
+    def test_failed_replay_leaves_fail_and_undecided_alone(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, verdict="FAIL", command="exit 3")
+        self.ok("ingest", rid)
+        self.assertEqual(self.ingest_json(rid)["verdict"], "FAIL")
+
+    def test_missing_script_hints_at_packet_cwd(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, command="python3 verify.py")
+        r = self.ok("ingest", rid)
+        self.assertIn("python3 packet/<name>", r.stdout)
+        self.assertEqual(self.ingest_json(rid)["verdict"], "UNDECIDED")
 
     def test_clean_replay_is_recorded(self):
         rid, _ = self.dispatch()

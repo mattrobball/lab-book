@@ -49,6 +49,7 @@ class LabCase(unittest.TestCase):
     def claims(self, *args, cwd=None):
         return subprocess.run([sys.executable, str(CLAIMS)] + list(args),
                               cwd=str(cwd or self.problem), capture_output=True,
+                              stdin=subprocess.DEVNULL,
                               text=True)
 
     def ok(self, *args, **kw):

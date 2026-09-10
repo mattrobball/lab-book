@@ -194,9 +194,18 @@ def fingerprint(text):
 
 
 def split_sections(text):
+    """Section body by lowercased heading. Blank lines at either end go;
+    indentation stays — stripping it once turned a Validation section
+    that opened with its indented command into one whose first indented
+    line was the expected output, and the replay ran `CHECK_OK`."""
     parts = claims.HEADING.split(text)
-    return {parts[i].strip().lower(): parts[i + 1].strip()
-            for i in range(1, len(parts) - 1, 2)}
+    out = {}
+    for i in range(1, len(parts) - 1, 2):
+        lines = parts[i + 1].splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        out[parts[i].strip().lower()] = "\n".join(lines).rstrip()
+    return out
 
 
 # ---------------------------------------------------------------- git
@@ -1553,22 +1562,24 @@ def read_packet(problem, rid, d):
 
 
 def replay_command(validation_text):
-    """The first fenced or indented code block, whole. The gate once ran only
-    the first line of a three-line block and passed on nothing."""
-    m = FENCE.search(validation_text)
-    if m:
-        block = m.group(1)
-    else:
-        m = INDENTED.search(validation_text)
-        if not m:
-            return None
+    """The first code block in the section, fenced or indented, whichever
+    comes first, whole. The gate once ran only the first line of a
+    three-line block and passed on nothing; later it preferred a fenced
+    block anywhere over an indented one earlier, and ran fenced expected
+    output as the command (exit 127, two reviews downgraded)."""
+    f, i = FENCE.search(validation_text), INDENTED.search(validation_text)
+    if f and (not i or f.start() <= i.start()):
+        block = f.group(1)
+    elif i:
         block_lines = []
-        for line in validation_text[m.start():].splitlines():
+        for line in validation_text[i.start():].splitlines():
             hit = INDENTED.match(line)
             if not hit:
                 break
             block_lines.append(hit.group(1))
         block = "\n".join(block_lines)
+    else:
+        return None
     block = "\n".join(l.rstrip() for l in block.splitlines() if l.strip())
     return block or None
 
@@ -1599,10 +1610,17 @@ def do_replay(rundir, secs, ret, rid, timeout):
         return False, ["the replay did not finish inside the %ss timeout "
                        "this dispatch set" % timeout], record
     record["exit"] = code
+    record["tail"] = out[-400:]
     missing = [m for m in ret["machine_markers"] if m not in out]
     if code != 0:
-        return False, ["the replay exited %d; a nonzero exit fails whatever "
-                       "was printed" % code], record
+        why = "the replay exited %d; a nonzero exit fails whatever was printed" % code
+        if code in (2, 127) or "No such file" in out or "can't open" in out:
+            why += (". It ran from the run directory, not from packet/: a "
+                    "script the worker wrote is `python3 packet/<name>`, and "
+                    "a command not on PATH exits 127. If the command is "
+                    "mis-stated, re-dispatch with it stated right; a replay is "
+                    "never run by hand")
+        return False, [why], record
     if missing:
         return False, ["the replay never printed %s, and markers are matched "
                        "character for character, never by pattern"
@@ -1819,6 +1837,14 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
 
         replayed, warnings, replay = do_replay(rundir, secs, ret, rid,
                                                d["timeout"])
+        worker_verdict = verdict
+        if verdict == "PASS" and ret["validation"] == "replay" and not replayed:
+            # combo R-006 and R-037 sat on record as PASS with a failed
+            # replay, and R-037's headline claims were allocated on that.
+            verdict = "UNDECIDED"
+            warnings.insert(0, "the packet says PASS but its replay did not "
+                            "pass, so this is recorded UNDECIDED: a PASS "
+                            "nobody can reproduce is an assertion")
         if args.reviewed:
             override = [x.strip() for chunk in args.reviewed
                         for x in chunk.split(",") if x.strip()]
@@ -1877,6 +1903,7 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
     # After the fence check, which reads the tree as the worker left it, and
     # before the commit that would otherwise carry these files in.
     record = {"run": rid, "ts": now(), "actor": actor, "verdict": verdict,
+              "worker_verdict": worker_verdict,
               "investigator": tag, "host": host(),
               "large_files": hold_back_large_files(problem, root, rid),
               "transcript": attach_transcript(problem, root, rid, d,

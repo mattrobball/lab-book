@@ -48,13 +48,18 @@ class ReplayCommandTests(unittest.TestCase):
         self.assertEqual(run.replay_command(text),
                          "python3 check.py\ngrep OK out.txt")
 
+    def test_section_keeps_the_indent_of_its_first_line(self):
+        secs = run.split_sections("## Validation\n\n    python3 x.py\n\n"
+                                  "It prints:\n\n    CHECK_OK\n\n## Leads\n\nNone.\n")
+        self.assertEqual(run.replay_command(secs["validation"]), "python3 x.py")
+        self.assertEqual(secs["leads"], "None.")
+
     def test_no_block_means_no_command(self):
         self.assertIsNone(run.replay_command("Nothing to run here."))
 
-    @unittest.expectedFailure
     def test_fenced_expected_output_is_not_run_as_the_command(self):
-        # HARNESS_ISSUES.md #8: a fenced block of expected output placed
-        # after the indented command is picked instead of the command.
+        # A fenced block of expected output placed after the indented
+        # command was picked instead of the command (exit 127).
         text = ("    python3 check.py\n\nExpected:\n\n```\nCHECK_OK\n```\n")
         self.assertEqual(run.replay_command(text), "python3 check.py")
 

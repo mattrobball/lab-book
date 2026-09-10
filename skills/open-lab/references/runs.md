@@ -443,7 +443,12 @@ then dispatch that referee: a review nobody has done validates nothing.
 `run.py ingest` checks the packet is complete and well-formed. For a replay it
 runs the command under the dispatched timeout: a nonzero exit fails whatever
 was printed, and every marker must appear exactly as written, not paraphrased
-and not matched by pattern. Ingest stamps the actor from `dispatch.json`,
+and not matched by pattern. A packet that says PASS and does not replay is
+filed UNDECIDED, with the worker's PASS kept beside it as `worker_verdict`:
+a PASS nobody can reproduce is an assertion, and two headline claims were
+once allocated on one. The replay runs from the run directory, so a script
+the worker wrote is `python3 packet/<name>`; a command that cannot be found
+says so in the warning. Ingest stamps the actor from `dispatch.json`,
 checks the write fence — judging only uncommitted files this worker could
 have written, never committed history or another run's directory — renders
 the notebook entry, warns when a proposed claim looks like one already on
