@@ -1446,12 +1446,33 @@ def do_replay(rundir, secs, ret, rid, timeout):
     return True, [], record
 
 
-def allocate_claim(problem, statement, actor):
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        claims.main(["new", "--statement", statement, "--actor", actor,
-                     "--problem", str(problem)])
-    return claims.first_id(buf.getvalue())
+def allocate_claim(problem, statement, actor, tag=None):
+    """On the ledger, not yet committed: the ingest commits once."""
+    return claims.record_new(problem, statement, actor, tag)
+
+
+def discard_half_ingest(problem, root, rid):
+    """Put back what an interrupted ingest of this problem may have left on
+    disk, so this attempt starts from the record: tracked files under
+    claims/ and runs/ as HEAD holds them, and untracked claim markers,
+    ledgers and notebook entries removed. Everything here is written only
+    by ingest, and the record is what is committed (frg R-175 and R-250,
+    combo R-019, dynkin R-156: four retries, thirty duplicate claims)."""
+    prel = rel(problem, root) or "."
+    tracked = git_out(root, "ls-files", "--", prel + "/claims", prel + "/runs")
+    if tracked:
+        git(root, "checkout", "HEAD", "--", prel + "/claims", prel + "/runs")
+    stray = git_out(root, "ls-files", "--others", "--exclude-standard", "--",
+                    prel + "/claims", prel + "/notebook/entries",
+                    prel + "/runs/%s/ingest.json" % rid)
+    for line in stray.splitlines():
+        p = root / line.strip()
+        if p.is_file() and (p.parent.name in ("_ids", "entries") or
+                            p.name.endswith(".jsonl") or
+                            p.name == "ingest.json" or
+                            p.parent.name == "claims"):
+            p.unlink()
+    claims.forget_committed()
 
 
 def similar(first, second):
@@ -1589,6 +1610,14 @@ def cmd_ingest(args):
         overdue_report(problem, skip={rid})
         return
 
+    with ingest_lock(root):
+        ingest_transaction(args, problem, root, rid, rundir, d, tag, actor)
+
+
+def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
+    """Everything an ingest records lands in one commit at the end. Until
+    then nothing is on record, and a retry after an interruption begins by
+    discarding what the interrupted attempt left on disk."""
     e = execution_record(problem, rid)
     if e and e.get("pid") and not e.get("end") and pid_alive(e["pid"]):
         refuse("%s's worker (pid %s) is still running. Ingesting a live run "
@@ -1598,6 +1627,7 @@ def cmd_ingest(args):
                "process; it covers a worker that has exited without "
                "execution.json saying so." % (rid, e["pid"], e["pid"]))
 
+    discard_half_ingest(problem, root, rid)
     try:
         verdict, secs, ret = read_packet(problem, rid, d)
 
@@ -1613,7 +1643,8 @@ def cmd_ingest(args):
         changed = dirty(root) - set(d.get("ignore") or [])
         changed = {p for p in changed
                    if not (any_run.match(p) and not p.startswith(own))
-                   and "__pycache__" not in p and not p.endswith(".pyc")}
+                   and "__pycache__" not in p and not p.endswith(".pyc")
+                   and p != ".ingest.lock"}
         bad = outside(changed, d["allowed"])
         if bad:
             refuse("%s wrote outside its fence: %s. It was allowed %s and "
@@ -1646,7 +1677,7 @@ def cmd_ingest(args):
     allocated = []
     for statement in ret["claims_proposed"]:
         dupes = near_duplicates(problem, statement)
-        cid = allocate_claim(problem, statement, actor)
+        cid = allocate_claim(problem, statement, actor, tag)
         allocated.append((cid, statement))
         if dupes:
             warnings.append("%s looks close to %s already on file — read them "
@@ -1698,8 +1729,15 @@ def cmd_ingest(args):
     write_json(rundir / "dispatch.json", d)
     paths = [rel(rundir, root), rel(problem / "notebook", root), ".gitignore"]
     paths += [rel(run_dir(problem, t), root) for t in touched]
-    with ingest_lock(root):
-        commit(root, paths, "%s ingested: %s — %s" % (rid, verdict, ret["headline"]))
+    if allocated:
+        claims.regenerate(problem)
+        paths += [rel(problem / "claims", root), rel(problem / "CLAIMS.md", root)]
+    message = "%s ingested: %s — %s" % (rid, verdict, ret["headline"])
+    if allocated:
+        message += "\n\n" + "\n".join("%s new (proposed): %s"
+                                        % (c, claims.one_line(s))
+                                        for c, s in allocated)
+    commit(root, paths, message)
 
     print("%s %s (replayed: %s)" % (rid, verdict, "yes" if replayed else "no"))
     for w in warnings + notes:

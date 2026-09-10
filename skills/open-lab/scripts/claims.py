@@ -920,6 +920,19 @@ def check_citation(cid, target, evidence):
                    % (evidence, cid))
 
 
+def record_new(problem, statement, actor, tag=None, rests=(), conditions=""):
+    """Allocate an ID and put the `new` event on the ledger. No commit: the
+    caller commits, once, with everything else it recorded — an ingest that
+    committed each claim as it went left claims on record with the run still
+    open whenever it was interrupted, and the retry minted a second set."""
+    cid = allocate(problem, actor, tag)
+    append(problem, {"event": "new", "id": cid, "ts": now(), "actor": actor,
+                     "status": "proposed", "statement": statement,
+                     "conditions": conditions, "rests_on": list(rests),
+                     "hash": text_hash(statement, conditions)}, tag)
+    return cid
+
+
 def cmd_new(args):
     problem = find_problem(args.problem)
     tag = require_own_branch(git_root(problem), "a new claim")
@@ -949,11 +962,7 @@ def cmd_new(args):
             print("Warning: this claim rests on %s, which is not a claim here "
                   "yet. `claims.py check` will keep flagging it." % r)
     statement, conditions = args.statement.strip(), (args.conditions or "").strip()
-    cid = allocate(problem, actor, tag)
-    append(problem, {"event": "new", "id": cid, "ts": now(), "actor": actor,
-                     "status": "proposed", "statement": statement,
-                     "conditions": conditions, "rests_on": rests,
-                     "hash": text_hash(statement, conditions)}, tag)
+    cid = record_new(problem, statement, actor, tag, rests, conditions)
     if target != "proposed":
         # One command, one commit: a claim that is only ever a citation
         # should not need two, and the gap between them is where a claim

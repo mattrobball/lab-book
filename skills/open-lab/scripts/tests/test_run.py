@@ -1431,3 +1431,53 @@ class TestDuplicateWarningLifecycle(LabCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAtomicIngest(LabCase):
+    """One ingest, one commit. A retry after an interruption starts from the
+    record, not from what the interrupted attempt left on disk."""
+
+    def test_ingest_is_one_commit_listing_its_claims(self):
+        rid, _ = self.dispatch()
+        before = self.log().count("\n")
+        self.packet(rid, ret={"claims_proposed": ["The bound is 9.",
+                                                  "The bound is sharp."]})
+        self.ok("ingest", rid)
+        log = self.log()
+        self.assertEqual(log.count("\n") - before, 1)
+        self.assertNotIn("C-001 new", log.splitlines()[0])
+        body = git(self.root, "log", "-1", "--pretty=%b").stdout
+        self.assertIn("C-001 new (proposed): The bound is 9.", body)
+        self.assertIn("C-002 new (proposed)", body)
+        self.assertEqual([e["id"] for e in self.ledger()], ["C-001", "C-002"])
+        self.assertIn("C-002", (self.problem / "CLAIMS.md").read_text())
+
+    def test_retry_after_an_interrupted_ingest_allocates_once(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed": ["The bound is 9."]})
+        # What an ingest interrupted after allocation leaves behind:
+        # a ledger line, an ID marker, a notebook entry, none committed.
+        stale = {"event": "new", "id": "C-001", "ts": "2026-09-02T19:33:20Z",
+                 "actor": "worker-a", "status": "proposed",
+                 "statement": "The bound is 9.", "conditions": "",
+                 "rests_on": [], "hash": "h"}
+        (self.problem / "claims" / "ledger.jsonl").write_text(json.dumps(stale) + "\n")
+        (self.problem / "claims" / "_ids").mkdir()
+        (self.problem / "claims" / "_ids" / "C-001").write_text("stale\n")
+        entries = self.problem / "notebook" / "entries"
+        entries.mkdir(parents=True)
+        (entries / "N-20260902-01-stale.md").write_text("# stale\n")
+        self.ok("ingest", rid)
+        self.assertEqual([e["id"] for e in self.ledger()], ["C-001"])
+        self.assertEqual(len(self.entries()), 1)
+        self.assertEqual(self.ingest_json(rid)["claims"], ["C-001"])
+        self.assertEqual(git(self.root, "status", "--short").stdout.strip(), "")
+
+    def test_refused_ingest_records_nothing(self):
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed": ["The bound is 9."]})
+        (self.problem / "rogue.txt").write_text("outside the fence\n")
+        self.refused("ingest", rid)
+        self.assertEqual(self.ledger(), [])
+        self.assertFalse((self.problem / "claims" / "_ids").exists())
+        self.assertNotIn("ingested", self.log())
