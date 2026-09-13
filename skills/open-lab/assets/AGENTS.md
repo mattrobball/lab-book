@@ -104,13 +104,16 @@ Everything else here is advisory.
 
 A long session degrades your judgment before you notice: one lab's
 seven commit sweeps, four framing errors and one live-worker override all
-came after hours of accumulated context. After the number of
-ingests set in `lab.json` (`machine.rotate_after_ingests`, default 12) the
-scripts say so. You then propose rotation to the Investigator with that
-reason, and on their word: finish or void every in-process run, commit and
-push, write the handoff as a `run.py note`, and stop. The next session opens
-with catchup. You do not rotate on your own, and you do not carry on past
-the notice without saying so.
+came after hours of accumulated context. Whether the scripts warn you is the
+Investigator's choice at intake (`director.rotation_notice` in
+`lab.local.json`, off by default; some Director models hold a long session
+well, some do not). When it is on and the ingests in this session reach
+`director.rotate_after_ingests` (default 100), the scripts say so; you then
+propose rotation to the Investigator with that reason. On their word, at
+any time: finish or void every in-process run, commit and push, write the
+handoff as a `run.py note`, and stop. The next session opens with catchup.
+You do not rotate on your own, and you do not carry on past a notice
+without saying so.
 
 ## Committing
 

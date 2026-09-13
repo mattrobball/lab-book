@@ -18,7 +18,12 @@ answer.
    here?)
 4. Anything known or already tried? (The first claims, and "do not retry
    unless" notes.)
-5. What are the constraints — budgets, cadence?
+5. What are the constraints — budgets, cadence? And one sub-question with
+   guidance: should I tell you when a session of mine has run long enough
+   that a fresh one might judge better? Fable 5 and Astra 6 generally do
+   not need it; Opus or Sol with a long context window set can. If unsure,
+   say yes and reset it later; otherwise it stays off. Recorded as
+   `director.rotation_notice` in `lab.local.json`, off by default.
 6. How should I talk to you? Asked as short sub-questions, one at a time:
    how much have you used coding agents (none, some, daily); where do you
    read — a phone, a laptop — and how long may a message be; do you want
@@ -63,7 +68,7 @@ asking anyone: it says what your machine can run.
     }
   },
   "tools": ["<confirmed-tool>", "<confirmed-tool>"],
-  "machine": {"max_heavy_runs": 2, "rotate_after_ingests": 12}
+  "machine": {"max_heavy_runs": 2}
 }
 ```
 
@@ -97,8 +102,9 @@ budgets a run is watched against. `usage_pattern` is a regex with named
 groups read over the worker's log when the built-in token shapes do not fit.
 `transcript` says where that worker's session file lives ("Transcripts").
 `machine.max_heavy_runs` is the Director's ceiling on compute-heavy workers
-at once; `machine.rotate_after_ingests` is when a session is told it has run
-long. On the shared side, `commits.max_mb` is the largest file ingest will
+at once; `director.rotation_notice` (off by default, set at intake) is
+whether a session is told it has run long, and `director.rotate_after_ingests`
+(default 100) is when. On the shared side, `commits.max_mb` is the largest file ingest will
 put in the history; `transcripts.max_mb` caps what is copied into the
 record; `sources.refetch_days` is when a baseline is called stale; `policy`
 is the group's own standing rules in plain sentences, read to anyone
@@ -583,11 +589,13 @@ so a stalled run cannot hide behind a report nobody asks for.
 
 Every `dispatch.json` and `ingest.json` records the Director session that
 wrote it (from `LAB_SESSION`, else `CLAUDE_CODE_SESSION_ID`, else `unknown`).
-When the ingests under the current session reach
-`machine.rotate_after_ingests` in `lab.json` (default 12), ingest says so,
-with the reason: judgment degrades with context, and one lab's worst
-hour was its longest session. Rotation is proposed to the Investigator and
-done on their word; the charter has the steps.
+When the Investigator asked for it at intake (`director.rotation_notice`
+in `lab.local.json`) and the ingests under the current session reach
+`director.rotate_after_ingests` (default 100), ingest says so, once at that
+count and at each multiple after, with the reason: judgment degrades with
+context, and one lab's worst hour was its longest session. Rotation is
+proposed to the Investigator and done on their word; the charter has the
+steps. With the notice off, rotation is still theirs to call at any time.
 
 ## Resource accounting
 

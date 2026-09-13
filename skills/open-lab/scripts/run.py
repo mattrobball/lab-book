@@ -315,16 +315,25 @@ def run_record_anywhere(root, problem, rid):
 
 
 def rotation_notice(problem, root):
-    """After N ingests in one Director session, say so — once per ingest,
-    never enforced. Rotation is the Investigator's call."""
+    """After N ingests in one Director session, say so — only when the
+    Investigator asked for it at intake (director.rotation_notice in
+    lab.local.json; off by default), never enforced. Some Director models
+    hold a long session well and some do not; the Investigator knows which
+    they are running. Rotation is the Investigator's call."""
+    director = lab_config(root).get("director") or {}
+    if not director.get("rotation_notice"):
+        return
     sid = director_session()
     if sid == "unknown":
         return
-    limit = ((lab_config(root).get("machine") or {}).get("rotate_after_ingests")
-             or 12)
+    limit = (director.get("rotate_after_ingests")
+             or (lab_config(root).get("machine") or {}).get("rotate_after_ingests")
+             or ROTATE_DEFAULT)
     n = len([1 for rid, _ in all_runs(problem)
              if (ingest_record(problem, rid) or {}).get("director_session") == sid])
-    if n >= limit:
+    # Once at the threshold and at each multiple after, not on every ingest:
+    # a notice repeated a hundred times is a notice nobody reads.
+    if n and n % limit == 0:
         print("This Director session has ingested %d run(s) in this problem "
               "(rotate_after_ingests is %d). Judgment degrades with context "
               "before it shows; one lab's worst hour was its longest "
@@ -333,6 +342,8 @@ def rotation_notice(problem, root):
               % (n, limit))
 
 
+ROTATE_DEFAULT = 100        # ingests per Director session before a notice;
+                            # 12 fired within the first hour of a busy lab
 HOOK_MARK = "open-lab guard-commit"
 RUN_DIR = re.compile(r"^((?:.*/)?)runs/([^/]+)/")
 

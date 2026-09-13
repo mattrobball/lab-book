@@ -707,7 +707,7 @@ class TestSpine(LabCase):
         """F-020: nothing said when a session had run long. The notice is
         printed; rotation itself is the Investigator's call."""
         cfg = self.local()
-        cfg["machine"] = {"rotate_after_ingests": 2}
+        cfg["director"]["rotate_after_ingests"] = 2      # notice still off
         self.write_local(cfg)
         env = {"LAB_SESSION": "sess-1"}
         for i in range(2):
@@ -715,6 +715,15 @@ class TestSpine(LabCase):
             self.packet(rid)
             out = self.ok("ingest", rid, env=env).stdout
         self.assertEqual(self.ingest_json(rid)["director_session"], "sess-1")
+        self.assertNotIn("Propose rotation", out)         # off by default
+        cfg["director"]["rotation_notice"] = True         # the intake answer
+        self.write_local(cfg)
+        rid, _ = self.dispatch(self.brief("q5", "b5.md"))
+        self.packet(rid)
+        self.assertNotIn("Propose rotation", self.ok("ingest", rid, env=env).stdout)  # 3
+        rid, _ = self.dispatch(self.brief("q6", "b6.md"))
+        self.packet(rid)
+        out = self.ok("ingest", rid, env=env).stdout                            # 4
         self.assertIn("Propose rotation", out)
         rid, _ = self.dispatch(self.brief("q9", "b9.md"))
         self.packet(rid)
