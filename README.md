@@ -234,7 +234,7 @@ restart; if "open the lab" is not recognised, restart the tool.
 
 ## Status
 
-Version 2.0.0. The charter, the three references, the templates, the
+Version 2.1.0. The charter, the three references, the templates, the
 glossary, and both scripts with their test suite (187 tests:
 `python3 -m unittest discover -s tests` from `skills/open-lab/scripts/`).
 Exercised end to end by a scripted cold start and a simulated two-person
