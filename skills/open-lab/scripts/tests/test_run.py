@@ -678,6 +678,31 @@ class TestSpine(LabCase):
         self.assertNotIn("without the label",
                          self.ok("catchup", "2020-01-01").stdout)
 
+    def test_status_lint_catches_a_claim_with_two_statuses_on_one_page(self):
+        """Four labs out of five: the bottom line was rewritten and an older
+        section kept the old status word beside the same claim ID."""
+        rid, _ = self.dispatch()
+        self.packet(rid, ret={"claims_proposed": ["The bound is 17.",
+                                                  "The bound is sharp."]})
+        self.ok("ingest", rid)
+        self.claims_py("set", "C-002", "refuted", "--evidence", rid,
+                       "--actor", "checker")
+        status = self.problem / "STATUS.md"
+        status.write_text("# Status: demo\n\n## Bottom line\n\nC-002 [refuted] "
+                          "by %s; C-001 (proposed) is next.\n\n## What is "
+                          "settled\n\n- C-002 [verified] — the bound is sharp.\n"
+                          "- C-009 (verified) — from elsewhere.\n" % rid)
+        out = self.ok("catchup", "2020-01-01").stdout
+        self.assertIn("calls C-002 refuted and verified", out)
+        self.assertIn('verified in "What is settled" (line 9)', out)
+        self.assertIn("The ledger says refuted", out)
+        self.assertIn("cites C-009 as verified", out)
+        self.assertIn("no such claim", out)
+        status.write_text("# Status: demo\n\n## Bottom line\n\nC-002 [refuted] "
+                          "by %s; C-001 (proposed) is next.\n" % rid)
+        self.assertNotIn("disagrees with the ledger",
+                         self.ok("catchup", "2020-01-01").stdout)
+
     def test_rotation_is_proposed_after_n_ingests_in_one_session(self):
         """F-020: nothing said when a session had run long. The notice is
         printed; rotation itself is the Investigator's call."""

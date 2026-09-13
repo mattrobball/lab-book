@@ -2490,6 +2490,57 @@ def status_report(problem):
         for cid, section, line in flagged:
             print("- cites %s, which is proposed, without the label — in "
                   "\"%s\": %s" % (cid, section, line[:110]))
+    for line in status_word_lint(path.read_text(), known):
+        print(line)
+
+
+STATUS_WORD = re.compile(r"\b(proposed|conditional|verified|refuted|superseded|"
+                         r"externally-established)\b")
+
+
+def status_word_lint(text, known):
+    """Every claim STATUS.md cites with a status word beside it, checked
+    against the ledger and against itself. A rewritten bottom line left
+    older sections saying the opposite in four labs out of five: one claim
+    'refuted' on line 33 and 'verified' on line 117 of the same page."""
+    cited = {}                                   # cid -> [(status, section, lineno)]
+    section, history = "(top)", False
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.startswith("#"):
+            section = line.lstrip("#").strip()
+            # A section kept as history is meant to disagree with today.
+            history = bool(re.search(r"histor|earlier|archive|as of 20",
+                                     section, re.I))
+            continue
+        if history:
+            continue
+        for m in CLAIM_ID.finditer(line):
+            tail = line[m.end():m.end() + 40]
+            w = STATUS_WORD.search(tail)
+            if w and not re.search(r"C-", tail[:w.start()]):
+                cited.setdefault(m.group(0), []).append((w.group(1), section, n))
+    out = []
+    for cid in sorted(cited, key=id_key):
+        uses = cited[cid]
+        words = sorted(set(u[0] for u in uses))
+        actual = known.get(cid, {}).get("status")
+        if len(words) > 1:
+            out.append("- STATUS.md calls %s %s: %s. The ledger says %s. One "
+                       "page, one status — fix the stale section."
+                       % (cid, " and ".join(words),
+                          "; ".join("%s in \"%s\" (line %d)" % u for u in uses),
+                          actual or "nothing (not a claim here)"))
+        elif actual and words[0] != actual:
+            out.append("- STATUS.md calls %s %s in \"%s\" (line %d); the ledger "
+                       "says %s." % (cid, words[0], uses[0][1], uses[0][2], actual))
+        elif not actual:
+            out.append("- STATUS.md cites %s as %s in \"%s\" (line %d), and there "
+                       "is no such claim in this problem — an ID from another "
+                       "problem, or a typo." % (cid, words[0], uses[0][1], uses[0][2]))
+    if out:
+        out.insert(0, "STATUS.md disagrees with the ledger, or with itself, on "
+                      "the status of a claim it cites:")
+    return out
 
 
 def catchup_lints(problem, root=None):
