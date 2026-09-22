@@ -68,6 +68,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rectification
 import reservations
+import replay as confined_replay
 import claims                                    # noqa: E402  (sibling script)
 from claims import (refuse, now, today, host, git, git_out, git_root,   # noqa: E402
                     lab_root, lab_config, investigators, joined, slug,
@@ -1798,11 +1799,13 @@ def do_replay(rundir, secs, ret, rid, timeout):
                "--record-broken`." % (rid, rid))
     record = {"command": cmd, "timeout": timeout}
     try:
-        # One sh script under set -e: a failing line fails the replay even
-        # when a later line exits clean.
-        r = subprocess.run("set -e\n" + cmd, shell=True, cwd=str(rundir),
-                           capture_output=True, text=True, timeout=timeout)
+        r, backend = confined_replay.execute(rundir, cmd, timeout)
+        record["isolation"] = backend
         out, code = r.stdout + r.stderr, r.returncode
+    except (confined_replay.ReplayUnavailable, OSError):
+        record.update(exit=None, isolation="unavailable")
+        return False, ["safe replay confinement is unavailable or the packet is not "
+                       "self-contained; no unsandboxed replay was attempted"], record
     except subprocess.TimeoutExpired:
         record["exit"] = None
         return False, ["the replay did not finish inside the %ss timeout "
@@ -2893,6 +2896,7 @@ def cmd_waive_review(args):
 # What a lab holds a copy of, and where the kit keeps the original.
 KIT_FILES = (("run.py", "scripts/run.py"), ("claims.py", "scripts/claims.py"),
              ("rectification.py", "scripts/rectification.py"),
+             ("replay.py", "scripts/replay.py"),
              ("reservations.py", "scripts/reservations.py"),
              ("board.py", "scripts/board.py"),
              ("v3", "assets/v3"),

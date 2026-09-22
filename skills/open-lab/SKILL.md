@@ -106,6 +106,7 @@ Then scaffold the lab repository:
    - `assets/GLOSSARY.md` → `GLOSSARY.md`
    - `scripts/claims.py` → `claims.py`
    - `scripts/run.py` → `run.py`
+   - `scripts/replay.py` → `replay.py`
    - `scripts/rectification.py`, `scripts/reservations.py`, `scripts/board.py` → the same names in the lab root
    - `assets/v3/` → `v3/` (optional host setup and lab CI instructions)
    - `assets/templates/` → `templates/`

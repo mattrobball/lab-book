@@ -102,6 +102,11 @@ def records(problem, include_remote=False):
     refs = [('HEAD', None)]
     if include_remote and root:
         refs += [(ref, tag) for tag, ref in claims.branch_refs(root)]
+    if root:
+        for ref in ('refs/remotes/origin/lab-book/publication', 'refs/heads/lab-book/publication'):
+            if claims.has_ref(root, ref):
+                refs.append((ref, 'automation'))
+                break
     result, seen = [], set()
     for ref, _ in refs:
         names = set()
@@ -111,12 +116,16 @@ def records(problem, include_remote=False):
             names.update(n for n in claims.list_branch_dir(root, ref, base.rstrip('/'))
                          if n.startswith('rectification') and n.endswith('.jsonl'))
         for name in sorted(names):
+            if ref.endswith('/lab-book/publication') and not name.startswith('rectification-automation-ci-'):
+                continue
             text = (claims.committed_text(problem, Path(problem) / 'claims' / name)
                     if ref == 'HEAD' else claims.read_branch_file(root, ref, base + name)) or ''
             for line in text.splitlines():
                 if not line.strip():
                     continue
                 rec = json.loads(line)
+                if ref.endswith('/lab-book/publication') and rec.get('event') not in ('comparison', 'check'):
+                    raise ValueError('automation publication cannot contain human rulings')
                 key = json.dumps(rec, sort_keys=True)
                 if key not in seen:
                     seen.add(key)

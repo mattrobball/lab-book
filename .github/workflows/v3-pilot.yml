@@ -19,7 +19,7 @@ jobs:
       - name: Install native fixture tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y nginx postgresql-client
+          sudo apt-get install -y nginx postgresql-client bubblewrap
           python -m pip install playwright==1.55.0
           python -m playwright install --with-deps chromium
           mkdir -p "$RUNNER_TEMP/pilot-bin"

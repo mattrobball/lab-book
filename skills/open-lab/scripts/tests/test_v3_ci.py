@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from test_federation import FederationCase, git
 import claims
+import rectification
 
 ASSETS = Path(__file__).resolve().parents[2] / 'assets' / 'v3'
 spec = importlib.util.spec_from_file_location('lab_ci', ASSETS / 'ci.py')
@@ -84,15 +85,17 @@ class PublicationTests(FederationCase):
         # A colleague's newer/equal clock must not hide this invocation's deferral.
         with patch.object(claims, 'now', return_value='2000-01-01T00:00:00Z'):
             self.publish(before=last_parent)
-        path = self.alice / 'v3/ci-state' / (ci.publisher('lab/alice') + '.json')
-        pending = json.loads(path.read_text())['problems']['problems/demo']['pending']
+        path = 'v3/ci-state/' + ci.publisher('lab/alice') + '.json'
+        pending = json.loads(git(self.remote, 'show', ci.PUBLICATION_BRANCH + ':' + path).stdout)['problems']['problems/demo']['pending']
+        self.assertFalse((self.alice / path).exists())
         self.assertEqual(set(pending), {first, second, peer})
         self.assertEqual(ledger.read_bytes(), before_bytes)
         self.assertEqual(git(self.alice, 'status', '--porcelain').stdout, '')
         self.assertTrue((self.output / 'demo/record.json').exists())
         manifest = json.loads((self.output / 'publication.json').read_text())
         self.assertIn('origin/lab/bob', manifest['visible_refs'])
-        self.assertEqual(manifest['published'], git(self.alice, 'rev-parse', 'HEAD').stdout.strip())
+        self.assertEqual(manifest['source'], git(self.alice, 'rev-parse', 'HEAD').stdout.strip())
+        self.assertEqual(manifest['published'], git(self.remote, 'rev-parse', ci.PUBLICATION_BRANCH).stdout.strip())
 
     def test_refuses_dirty_source_before_any_publication(self):
         head = git(self.alice, 'rev-parse', 'HEAD').stdout
@@ -121,7 +124,9 @@ class PublicationTests(FederationCase):
                 advanced.append(git(other, 'rev-parse', 'HEAD').stdout.strip())
             return real(root, *args, **kw)
         with patch.object(ci, 'git', side_effect=race):
-            with self.assertRaises(ci.PublicationError): self.publish()
+            manifest = self.publish()
+        self.assertEqual(manifest['publication'], 'pushed')
+        self.assertEqual(manifest['published'], git(self.remote, 'rev-parse', ci.PUBLICATION_BRANCH).stdout.strip())
         remote = git(self.remote, 'rev-parse', 'lab/alice').stdout.strip()
         self.assertEqual(remote, advanced[0])
         fresh = self.clone('retry', 'CI')
@@ -130,6 +135,80 @@ class PublicationTests(FederationCase):
         self.assertEqual((fresh / 'human.txt').read_text(), 'Concurrent investigator work')
         self.assertTrue(git(fresh, 'show', 'HEAD:problems/demo/claims/ledger-alice.jsonl').stdout.find(cid) >= 0)
         self.assertEqual(git(fresh, 'status', '--porcelain').stdout, '')
+
+    def test_ci_wins_between_two_real_investigator_cycles_without_divergence(self):
+        first = self.work(self.alice, name='first.md')
+        source = git(self.alice, 'rev-parse', 'HEAD').stdout.strip()
+        publisher = self.clone('publisher', 'CI')
+        git(publisher, 'checkout', '-q', 'lab/alice')
+        manifest = self.publish(publisher)
+        self.assertEqual(git(self.remote, 'rev-parse', 'lab/alice').stdout.strip(), source)
+        self.assertEqual(git(publisher, 'rev-parse', 'HEAD').stdout.strip(), source)
+        self.assertEqual(git(publisher, 'status', '--porcelain').stdout, '')
+        rid, _ = self.dispatch(self.alice, name='second.md')
+        self.packet(self.alice, rid)
+        response = self.ok(self.alice, 'ingest', rid)
+        self.assertNotIn('Not pushed to origin', response.stdout)
+        record = json.loads(git(self.remote, 'show', 'lab/alice:problems/demo/runs/' + rid + '/ingest.json').stdout)
+        self.assertEqual(record['verdict'], 'PASS')
+        self.assertTrue(record['replayed'])
+        self.assertEqual(git(self.alice, 'rev-parse', 'HEAD').stdout.strip(),
+                         git(self.remote, 'rev-parse', 'lab/alice').stdout.strip())
+        paths = git(self.remote, 'ls-tree', '-r', '--name-only', ci.PUBLICATION_BRANCH).stdout.splitlines()
+        self.assertTrue(paths)
+        self.assertFalse(any('/runs/' in p or '/ledger' in p or p.endswith('.py') for p in paths))
+        print('CI_WINS: two real cycles reached origin; source unchanged by publisher')
+
+    def test_competing_automation_push_fails_without_overwriting_either_writer(self):
+        self.publish()
+        source = git(self.alice, 'rev-parse', 'HEAD').stdout.strip()
+        real = ci.git
+        advanced = []
+        def race(root, *args, **kw):
+            if args[0] == 'push' and not advanced:
+                other = self.clone('other-publisher', 'CI')
+                git(other, 'checkout', '-q', ci.PUBLICATION_BRANCH)
+                path = other / 'v3/ci-state' / (ci.publisher('lab/bob') + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'version':1, 'branch':'lab/bob', 'problems':{}}))
+                git(other, 'add', '--', str(path)); git(other, 'commit', '-qm', 'other publisher')
+                git(other, 'push', '-q', 'origin', ci.PUBLICATION_BRANCH)
+                advanced.append(git(other, 'rev-parse', 'HEAD').stdout.strip())
+            return real(root, *args, **kw)
+        with patch.object(ci, 'git', side_effect=race):
+            with self.assertRaises(ci.PublicationError):
+                self.publish(retry=[self.claim_for_retry()])
+        self.assertEqual(git(self.remote, 'rev-parse', ci.PUBLICATION_BRANCH).stdout.strip(), advanced[0])
+        self.assertEqual(git(self.alice, 'status', '--porcelain').stdout, '')
+        result = self.publish()
+        self.assertEqual(git(self.remote, 'merge-base', advanced[0], result['published']).stdout.strip(), advanced[0])
+
+    def claim_for_retry(self):
+        cid = self.claim(self.alice, 'The sum of one and one is two.')
+        git(self.alice, 'push', '-q', 'origin', 'lab/alice')
+        return cid
+
+    def test_fetched_advisory_flags_are_visible_without_merging_or_status_writes(self):
+        a = self.claim(self.alice, 'The invariant is two.')
+        b = self.claim(self.bob, 'The invariant is three.')
+        for clone, branch in ((self.alice,'lab/alice'), (self.bob,'lab/bob')):
+            git(clone,'push','-q','origin',branch)
+        publisher = self.clone('publisher','CI')
+        git(publisher,'checkout','-q','lab/alice')
+        claims.forget_committed()
+        known = claims.load(self.problem(publisher), include_remote=True)[0]
+        key = rectification.pair_key(known[a],known[b])
+        judge = rectification.MockJev({key: {'same_claim':.01,'contradictory':.99,
+                  'first_entails_second':.01,'second_entails_first':.01}})
+        with patch.object(rectification,'configured_judge',return_value=judge):
+            result=self.publish(publisher,retry=[a])
+        git(self.alice,'fetch','-q','origin')
+        claims.forget_committed()
+        known=claims.load(self.problem(self.alice), include_remote=True)[0]
+        self.assertEqual(known[a]['contradictions'][0]['key'],key)
+        self.assertEqual(known[b]['contradictions'][0]['key'],key)
+        self.assertEqual(known[a]['status'],'proposed')
+        self.assertFalse(list((self.problem(self.alice)/'claims').glob('rectification-automation-ci-*')))
 
 
 if __name__ == '__main__':
