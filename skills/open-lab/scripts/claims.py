@@ -23,10 +23,15 @@ import json
 import os
 import re
 import socket
+import rectification
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Keep sibling-module callbacks on the same committed-record cache as the CLI.
+if __name__ == "__main__":
+    sys.modules["claims"] = sys.modules[__name__]
 
 STATUSES = ["proposed", "conditional", "verified", "externally-established",
             "accepted-by-investigator", "refuted", "superseded"]
@@ -655,7 +660,9 @@ def load(problem, include_remote=False, root=None):
     events = stream_events(problem)
     if include_remote:
         events += remote_events(problem, root)
-    return fold(events)
+    known, order = fold(events)
+    rectification.attach(problem, known, include_remote)
+    return known, order
 
 
 def append(problem, rec, tag=None):
@@ -744,6 +751,8 @@ def view_text(c):
         lines.append("**Independence:** %s" % c["independence"])
     if c["superseded_by"]:
         lines.append("**Superseded by:** %s" % c["superseded_by"])
+    for notice in rectification.summary({c["id"]: c}):
+        lines.append("**Comparison:** " + notice)
     lines += ["", "## Statement", "", c["statement"].strip(), "",
               "## Conditions", "", c["conditions"].strip() or "None stated.", "",
               "## Evidence", "", c["evidence"] or "None on record.", "",
@@ -763,6 +772,10 @@ def view_text(c):
             lines.append("- %s — %s -> %s, by %s%s%s"
                          % (rec["ts"], rec["from"], rec["to"], rec["actor"],
                             tail, why))
+    for rec in c["history"]:
+        if rec.get("acknowledged_contradictions"):
+            lines.append("- Promotion over explicitly acknowledged open contradictions: "
+                         + json.dumps(rec["acknowledged_contradictions"], sort_keys=True))
     return "\n".join(lines) + "\n"
 
 
@@ -787,6 +800,9 @@ def regenerate(problem):
                        c["discoverer"], c["evidence"] or "—"))
     if not order:
         rows.append("| — | — | No claims yet. | — | — |")
+    notices = rectification.summary(claims)
+    if notices:
+        rows += ["", "## Comparison notices", ""] + ["- " + n for n in notices]
     (problem / "CLAIMS.md").write_text("\n".join(rows) + "\n")
 
 
@@ -898,7 +914,7 @@ def cascade_plan(claims, cid, target, by, actor, when=None):
         else:
             clause = "%s is verified again" % cid
         conditions = (conditions + "; " + clause) if conditions else clause
-        events.append({"event": "set", "id": other, "ts": when, "actor": actor,
+        events.append({"event": "set", "id": other, "ts": when, "actor": actor, "cascade_from": cid,
                        "from": "verified", "to": "conditional", "evidence": None,
                        "by": None, "statement": c["statement"],
                        "conditions": conditions,
@@ -1096,6 +1112,7 @@ def cmd_new(args):
                          "by": None, "statement": statement,
                          "conditions": conditions,
                          "hash": text_hash(statement, conditions)}, tag)
+    rectification.check_new(problem, [cid], tag)
     regenerate(problem)
     commit(problem, "%s new (%s)" % (cid, target))
     print(cid)
@@ -1278,12 +1295,36 @@ def cmd_set(args):
     if statement != c["statement"] or conditions != c["conditions"]:
         print("Note: the statement or conditions in %s.md differ from the "
               "ledger. Recording the file's wording as the claim's text." % cid)
+    acknowledged = []
+    if target == "verified":
+        # A status promotion cannot smuggle a text revision under an old pair
+        # acknowledgment (or under evidence that checked the old statement).
+        if text_hash(statement, conditions) != c["hash"]:
+            refuse("record the changed statement/conditions as a new proposed claim "
+                   "before verifying it, or restore the committed wording; "
+                   "a promotion cannot revise the acknowledged claim version")
+        visible, _ = load(problem, include_remote=True)
+        if visible[cid]["hash"] != c["hash"]:
+            refuse("the visible claim version differs from this branch; reconcile "
+                   "that revision before promoting or acknowledging it")
+        conflicts = visible[cid].get("contradictions", [])
+        required = {n["key"] for n in conflicts}
+        supplied = set(getattr(args, "acknowledge_contradictions", None) or [])
+        for notice in conflicts:
+            print("Open contradiction: %s / %s [%s], pair %s"
+                  % (cid, notice["other"], notice["source"], notice["key"]))
+        if required != supplied:
+            refuse("acknowledge each CURRENT open contradiction explicitly with "
+                   "--acknowledge-contradictions <pair hash>; no status changed. "
+                   "Required: %s" % (", ".join(sorted(required)) or "none"))
+        acknowledged = conflicts
     rec = {"event": "set", "id": cid, "ts": now(), "actor": actor,
            "from": old, "to": target, "evidence": evidence or None,
            "by": args.by, "statement": statement, "conditions": conditions,
            "reason": reason or None, "hash": text_hash(statement, conditions)}
     if target == "verified":
         rec["independence"] = independence
+        rec["acknowledged_contradictions"] = acknowledged
     if rests is not None:
         rec["rests_on"] = rests
     append(problem, rec, tag)
@@ -1364,6 +1405,7 @@ def cmd_check(args):
             warnings.append("%s is superseded but names no replacement. Set it "
                             "again with --by <ID> so readers know what to read "
                             "instead." % cid)
+    warnings += rectification.summary(claims)
     if warnings:
         print("%d thing(s) to look at:" % len(warnings))
         for w in warnings:
@@ -1410,6 +1452,8 @@ def main(argv=None):
                    action="store_true",
                    help="allow evidence from the same model that discovered "
                         "the claim; recorded as Independence: none")
+    s.add_argument("--acknowledge-contradictions", action="append", metavar="PAIR_HASH",
+                   help="explicitly acknowledge this current open pair when verifying; repeat for each")
     s.set_defaults(func=cmd_set)
 
     a = sub.add_parser("affirm", help="record a decision that leaves the "
@@ -1425,11 +1469,22 @@ def main(argv=None):
                                        "ledgers; changes nothing else")
     b.set_defaults(func=cmd_rebuild, actor=None)
 
-    for q in (n, s, c, b, a):
+    x = sub.add_parser("compare", help="compare named claim versions; no status changes")
+    x.add_argument("--new", action="append", required=True, metavar="CLAIM_ID")
+    x.add_argument("--mock-responses", help="explicit MOCK probability fixtures, never live judgments")
+    x.set_defaults(func=rectification.cmd_compare)
+    d = sub.add_parser("dismiss", help="record a human dismissal of a current comparison flag")
+    d.add_argument("pair")
+    d.add_argument("--kind", choices=("contradiction", "duplicate", "adjudication"), required=True)
+    d.add_argument("--reason", required=True)
+    d.add_argument("--issue", help="issue URL or meeting reference for this ruling")
+    d.set_defaults(func=rectification.cmd_dismiss)
+
+    for q in (n, s, c, b, a, x, d):
         q.add_argument("--problem", help="the problem: its slug, or its path "
                                          "(default: found by walking up from "
                                          "here)")
-    for q in (n, s, a):
+    for q in (n, s, a, d):
         q.add_argument("--actor", help="who is making this change (default: "
                                        "your investigator tag, once anyone "
                                        "has joined the lab)")

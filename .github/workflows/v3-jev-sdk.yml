@@ -1,0 +1,40 @@
+name: V3 Jev SDK contract (no paid calls)
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install typesafe-sdk==0.7.1
+      - name: Test actual SDK with network forbidden
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source.sha
+          git archive HEAD | gzip > evidence/source.tar.gz
+          sha256sum evidence/source.tar.gz > evidence/source.sha256
+          python -m pip freeze > evidence/dependencies.txt
+          printf '%s\n' 'python skills/open-lab/integration/jev_sdk_contract.py' > evidence/command.txt
+          set +e
+          python skills/open-lab/integration/jev_sdk_contract.py > evidence/stdout 2> evidence/stderr
+          result=$?
+          printf '%s\n' "$result" > evidence/exit
+          cat evidence/stdout evidence/stderr
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-sdk-contract-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30

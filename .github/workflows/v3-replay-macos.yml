@@ -1,0 +1,65 @@
+name: V3 macOS replay confinement
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native replay and exact first-pass upgrade
+        env:
+          PYTHONPATH: skills/open-lab/scripts:skills/open-lab/scripts/tests
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source.sha
+          git archive HEAD | gzip > evidence/source.tar.gz
+          shasum -a 256 evidence/source.tar.gz > evidence/source.sha256
+          python --version > evidence/python.txt
+          sw_vers > evidence/macos.txt
+          set +e
+          printf '%s\n' 'python -m unittest test_replay_isolation -v' > evidence/replay.command
+          python -m unittest test_replay_isolation -v > evidence/replay.stdout 2> evidence/replay.stderr
+          replay=$?
+          echo "$replay" > evidence/replay.exit
+          printf '%s\n' 'python skills/open-lab/integration/upgrade_contract.py' > evidence/upgrade.command
+          python skills/open-lab/integration/upgrade_contract.py > evidence/upgrade.stdout 2> evidence/upgrade.stderr
+          upgrade=$?
+          echo "$upgrade" > evidence/upgrade.exit
+          cat evidence/*.stdout evidence/*.stderr
+          test "$replay" = 0 && test "$upgrade" = 0
+      - name: Retain restricted-runtime failures
+        if: failure()
+        run: |
+          mkdir -p evidence
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'process == "sandboxd" OR eventMessage CONTAINS "Sandbox:"' > evidence/sandbox.log 2>&1 || true
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          summaries=[]
+          for folder in (Path.home()/'Library/Logs/DiagnosticReports', Path('/Library/Logs/DiagnosticReports')):
+              for p in folder.glob('*.ips'):
+                  if p.name.split('-')[0] not in ('sh','bash','Python','python3','sleep','sandbox-exec'): continue
+                  try:
+                      text=p.read_text(); header,body=text.split('\n',1); obj=json.loads(body)
+                      summaries.append({'file':p.name, 'exception':obj.get('exception'), 'termination':obj.get('termination'), 'asi':obj.get('asi'), 'usedImages':obj.get('usedImages')})
+                  except Exception as exc: summaries.append({'file':p.name,'error':type(exc).__name__})
+          Path('evidence/crash-summaries.json').write_text(json.dumps(summaries,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-replay-${{ github.sha }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30

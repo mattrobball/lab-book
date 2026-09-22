@@ -1,0 +1,21 @@
+[Unit]
+Description=Lab Book private identity bridge
+After=network.target
+[Service]
+User=lab-book
+Group=www-data
+RuntimeDirectory=lab-book-identity
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/lab-book/v3/identity.py --config /etc/lab-book/identity.json --socket /run/lab-book-identity/bridge.sock
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+ReadWritePaths=/run/lab-book-identity
+[Install]
+WantedBy=multi-user.target

@@ -226,3 +226,11 @@ plumbing.
 1. The 18 contradictions found in the live labs have not been ruled on by anyone who
    knows the mathematics. Until they are, the measured false-positive rate is the only
    estimate of how many are real.
+
+
+### Implementation clarification (Investigator, 2026-09-22)
+
+Minimal first pass authorized. There is **no preemption**: coordination only
+announces existing work. This supersedes the preempt wording in decision 2.
+Jev calls are mocked for behavior tests; no paid API calls are made.
+Implementation and evidence are described in `V3_IMPLEMENTATION.md`.

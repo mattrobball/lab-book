@@ -1,0 +1,81 @@
+# Install in a trusted LAB repository. Never run privileged code from fork PRs.
+name: Lab v3
+on:
+  push:
+    branches: ['main', 'master', 'lab/**']
+  workflow_dispatch:
+    inputs:
+      retry_claims:
+        description: 'Space-separated existing claim IDs to retry; no all-pairs backfill'
+        required: false
+        type: string
+permissions:
+  contents: write
+  issues: write
+# Shared issues and the board have ONE publisher across every investigator branch.
+# queue:max preserves up to 100 waiting jobs; overflow/cancellation needs rerun.
+concurrency:
+  group: lab-v3-publication
+  queue: max
+  cancel-in-progress: false
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record exact inputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/lab-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/lab-evidence/source.sha"
+          git for-each-ref --format='%(refname) %(objectname)' refs/remotes/origin > "$RUNNER_TEMP/lab-evidence/refs.txt"
+          git archive HEAD | gzip > "$RUNNER_TEMP/lab-evidence/source.tar.gz"
+          sha256sum "$RUNNER_TEMP/lab-evidence/source.tar.gz" > "$RUNNER_TEMP/lab-evidence/source.sha256"
+          python --version > "$RUNNER_TEMP/lab-evidence/python.txt"
+      - name: Compare, publish, and render
+        env:
+          BEFORE: ${{ github.event.before }}
+          RETRY_CLAIMS: ${{ inputs.retry_claims }}
+          GITHUB_TOKEN: ${{ github.token }}
+          LAB_BOOK_SERIALIZED_PUBLICATION: '1'
+        run: |
+          git config user.name 'lab-book CI'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # No stored credential, key on argv, interpolated input, or worker key.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          python - <<'PY'
+          import json, os, pathlib, subprocess, sys
+          e = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lab-evidence'
+          command = [sys.executable, 'v3/ci.py', '--output', os.environ['RUNNER_TEMP'] + '/lab-board', '--sync-issues']
+          if os.environ.get('BEFORE'): command += ['--before', os.environ['BEFORE']]
+          for cid in os.environ.get('RETRY_CLAIMS', '').split(): command += ['--retry', cid]
+          (e / 'command.json').write_text(json.dumps(command))
+          with (e / 'stdout').open('w') as out, (e / 'stderr').open('w') as err:
+              result = subprocess.run(command, stdout=out, stderr=err)
+          (e / 'exit').write_text(str(result.returncode) + '\n')
+          print((e / 'stdout').read_text()); print((e / 'stderr').read_text(), file=sys.stderr)
+          raise SystemExit(result.returncode)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lab-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: private-lab-board-${{ github.run_id }}
+          path: ${{ runner.temp }}/lab-board/
+          if-no-files-found: error
+          retention-days: 14
