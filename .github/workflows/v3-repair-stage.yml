@@ -2,7 +2,7 @@ name: V3 exact patch objects (temporary)
 on:
   push:
     branches: ['repair/v3-review-fixes-20260922']
-    paths: ['maintenance/v3-invariants.patch']
+    paths: ['maintenance/v3-invariants.patch', '.github/workflows/v3-repair-stage.yml']
 permissions:
   contents: write
 jobs:
@@ -22,13 +22,14 @@ jobs:
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request
           assert os.environ['GITHUB_REPOSITORY'] == 'mattrobball/lab-book'
           patch = pathlib.Path('maintenance/v3-invariants.patch').read_bytes()
+          patch = patch.replace(b'# E402', b'# noqa: E402')
           subprocess.run(['git','apply','--check','-'],input=patch,check=True)
           subprocess.run(['git','apply','--index','-'],input=patch,check=True)
           expected = {
-            'skills/open-lab/scripts/claims.py': '0940162',
-            'skills/open-lab/scripts/run.py': '4fe4f90',
-            'skills/open-lab/scripts/tests/test_v3.py': '2f17c4b',
-            'skills/open-lab/scripts/tests/test_v3_postgres.py': '4bf5b51'
+            'skills/open-lab/scripts/claims.py': '0940162ddc0cf13a105d2fd21510e635ee8327ca',
+            'skills/open-lab/scripts/run.py': '4fe4f90e6a7e810766bee483be2d38647e8277f2',
+            'skills/open-lab/scripts/tests/test_v3.py': '2f17c4bcceeff5d1ce855f83c1b445d5ee700345',
+            'skills/open-lab/scripts/tests/test_v3_postgres.py': '4bf5b51a80c5a9d53d661c134a1a718ad24920e7'
           }
           paths = subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
           assert set(paths) == set(expected)
@@ -36,7 +37,7 @@ jobs:
           for path in paths:
               data=pathlib.Path(path).read_bytes()
               digest=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-              assert digest.startswith(expected[path]), (path,digest)
+              assert digest == expected[path], (path,digest)
               body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()}).encode()
               req=urllib.request.Request('https://api.github.com/repos/mattrobball/lab-book/git/blobs',data=body,method='POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'})
               with urllib.request.urlopen(req,timeout=30) as response: result=json.load(response)
