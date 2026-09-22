@@ -1,0 +1,54 @@
+# Include inside http {}. Replace LAB_HOST, TLS_CERT and TLS_KEY explicitly.
+# Only nginx listens publicly. All board files, including JSON, require identity.
+upstream lab_identity { server unix:/run/lab-book-identity/bridge.sock; }
+limit_req_zone $binary_remote_addr zone=lab_api:10m rate=10r/s;
+server {
+    listen 443 ssl;
+    server_name LAB_HOST;
+    ssl_certificate TLS_CERT;
+    ssl_certificate_key TLS_KEY;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /srv/lab-book/board;
+    client_max_body_size 64k;
+    client_body_timeout 5s;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Cache-Control "private, no-store" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" always;
+    location = /_lab_auth {
+        internal;
+        proxy_pass http://lab_identity/auth;
+        proxy_pass_request_body off;
+        proxy_method GET;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Auth-Request-User "";
+    }
+    location /oauth2/ {
+        proxy_pass http://127.0.0.1:4180;
+        proxy_set_header Host LAB_HOST;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Auth-Request-User "";
+        proxy_set_header X-Forwarded-User "";
+    }
+    # RPC authentication and Origin/CSRF checks occur inside the bridge itself.
+    location /api/rpc/ {
+        limit_req zone=lab_api burst=20 nodelay;
+        proxy_read_timeout 10s;
+        proxy_pass http://lab_identity;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Auth-Request-User "";
+        proxy_set_header X-Forwarded-User "";
+    }
+    location /api/ { return 404; }
+    location / {
+        auth_request /_lab_auth;
+        error_page 401 = /oauth2/sign_in;
+        try_files $uri $uri/ =404;
+    }
+}
