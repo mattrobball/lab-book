@@ -38,6 +38,24 @@ jobs:
           echo "$upgrade" > evidence/upgrade.exit
           cat evidence/*.stdout evidence/*.stderr
           test "$replay" = 0 && test "$upgrade" = 0
+      - name: Retain restricted-runtime failures
+        if: failure()
+        run: |
+          mkdir -p evidence
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'process == "sandboxd" OR eventMessage CONTAINS "Sandbox:"' > evidence/sandbox.log 2>&1 || true
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          summaries=[]
+          for folder in (Path.home()/'Library/Logs/DiagnosticReports', Path('/Library/Logs/DiagnosticReports')):
+              for p in folder.glob('*.ips'):
+                  if p.name.split('-')[0] not in ('sh','bash','Python','python3','sleep','sandbox-exec'): continue
+                  try:
+                      text=p.read_text(); header,body=text.split('\n',1); obj=json.loads(body)
+                      summaries.append({'file':p.name, 'exception':obj.get('exception'), 'termination':obj.get('termination'), 'asi':obj.get('asi'), 'usedImages':obj.get('usedImages')})
+                  except Exception as exc: summaries.append({'file':p.name,'error':type(exc).__name__})
+          Path('evidence/crash-summaries.json').write_text(json.dumps(summaries,indent=2)+'\n')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
