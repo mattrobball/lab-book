@@ -234,3 +234,44 @@ Minimal first pass authorized. There is **no preemption**: coordination only
 announces existing work. This supersedes the preempt wording in decision 2.
 Jev calls are mocked for behavior tests; no paid API calls are made.
 Implementation and evidence are described in `V3_IMPLEMENTATION.md`.
+
+
+## 4. Single-writer service — Git becomes the durable backend, not the write protocol
+
+**Chosen 2026-09-22 (Investigator).** This supersedes the active-write topology in
+§2/§3 for v3. The trigger was the review of the partial-service design: once the
+service/CI owned some Git mutation, splitting durable writes between local
+investigator processes and automation produced a second-writer race and additional
+branch machinery. The simpler boundary is for the service to own all canonical Git
+mutation.
+
+### Decisions
+
+1. **The service is the sole writer of the canonical lab Git repository.** Human
+   clients, Directors, workers and CI do not push lab-record commits.
+2. **One canonical record replaces active per-investigator Git branches.** Actor
+   identity and independent viewpoints remain explicit in events; branch topology is
+   no longer the representation of disagreement.
+3. **Git remains the permanent record.** PostgreSQL holds only soft/rebuildable
+   collaboration and service state. GitHub Issues are discussion/mirrors, not
+   authoritative rulings.
+4. **Every durable action is a typed service operation.** Dispatch, ingest, void,
+   notes, claim changes, dismissals, meeting rulings, automated comparison events and
+   upgrades all become service-created commits.
+5. **The service serializes commits and uses request IDs for idempotency.** A durable
+   operation is not acknowledged until its canonical Git commit is present remotely.
+   No force push or automatic history rewrite.
+6. **The service is now required for new canonical mutations.** Already-dispatched
+   workers may continue while it is unavailable and submit later; clients do not
+   bypass an outage by pushing an alternate Git history.
+7. **One public authentication path.** Browser and agent requests hit the service.
+   Git/database/provider write credentials remain service-side. PostgreSQL may retain
+   RLS as defense in depth but is not directly exposed to clients.
+8. **CI becomes read-only.** It may test and render disposable artifacts, but it does
+   not commit advisory state. Automated comparisons are service jobs whose results
+   are committed by the same single writer.
+9. **Migration preserves old history rather than rewriting it.** Legacy investigator
+   and publication refs become read-only audit material; the service records their
+   exact heads when establishing the canonical starting revision.
+
+The full target architecture and acceptance criteria are in `DESIGN_V3.md`.
