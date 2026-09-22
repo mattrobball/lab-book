@@ -1,0 +1,61 @@
+name: V3 corrected objects
+on:
+  push:
+    branches: ['implementation/v3-minimal-20260922']
+    paths: ['.github/workflows/v3-correction-objects.yml']
+permissions:
+  contents: write
+jobs:
+  objects:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact reviewed changes and upload blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, py_compile, subprocess, urllib.request
+          expected = {
+            'skills/open-lab/scripts/rectification.py': ['703165373d09b207453eb09ebf51ccc916497d38','1291023abffdaf990b00c7ff50364e9e6f46b968'],
+            'skills/open-lab/scripts/board.py': ['4006fb18d2d63cc5cd5f0ffe4dafcc74821fb986','069b0cf463dc250fba936f7261dcaec1b28f7618'],
+            'skills/open-lab/scripts/tests/test_run.py': ['e217918725f4cc0a1b50051be319025f7280d274','16a04a1984109970197bdb686a244e5d8c755158'],
+            'skills/open-lab/scripts/tests/test_federation.py': ['ef3c0858cb2a31bb7fe6b9803c0efb34a04b2bb2','942ba46c7c7b1483275d4d40f1234e89ecdafaa5'],
+            'skills/open-lab/scripts/tests/test_v3.py': ['f4405ead77d0ddc6aa91b2cd23fe3ad4d972be41','369a04fc78b18b99cf6d3aa29f3fb67633e56907']
+          }
+          def blob(name):
+              data=pathlib.Path(name).read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for name,(old,new) in expected.items():
+              assert blob(name)==old, 'base drift: '+name
+          subprocess.run(['git','apply','--check','.github/v3-correction.patch'],check=True)
+          subprocess.run(['git','apply','.github/v3-correction.patch'],check=True)
+          changed=set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert changed==set(expected), changed
+          for name,(old,new) in expected.items():
+              assert blob(name)==new, ('unexpected output',name,blob(name),new)
+              py_compile.compile(name,doraise=True)
+          out=pathlib.Path('object-evidence');out.mkdir()
+          (out/'source.sha').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          mapping={}
+          for name,(old,new) in expected.items():
+              payload=json.dumps({'content':pathlib.Path(name).read_text(),'encoding':'utf-8'}).encode()
+              req=urllib.request.Request('https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']+'/git/blobs',data=payload,method='POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'})
+              with urllib.request.urlopen(req,timeout=30) as response:
+                  result=json.load(response)
+              assert result['sha']==new
+              mapping[name]=new
+          (out/'objects.json').write_text(json.dumps(mapping,indent=2)+'\n')
+          print(json.dumps(mapping,indent=2))
+          print('Verified blobs only; no commit or branch ref changed by this job.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v3-corrected-objects
+          path: object-evidence/
+          if-no-files-found: error
+          retention-days: 7
