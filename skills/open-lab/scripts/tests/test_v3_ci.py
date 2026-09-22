@@ -81,7 +81,9 @@ class PublicationTests(FederationCase):
         git(self.alice, 'fetch', '-q', 'origin')
         ledger = self.problem(self.alice) / 'claims' / 'ledger-alice.jsonl'
         before_bytes = ledger.read_bytes()
-        self.publish(before=last_parent)
+        # A colleague's newer/equal clock must not hide this invocation's deferral.
+        with patch.object(claims, 'now', return_value='2000-01-01T00:00:00Z'):
+            self.publish(before=last_parent)
         path = self.alice / 'v3/ci-state' / (ci.publisher('lab/alice') + '.json')
         pending = json.loads(path.read_text())['problems']['problems/demo']['pending']
         self.assertEqual(set(pending), {first, second, peer})

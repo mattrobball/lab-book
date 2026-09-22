@@ -84,6 +84,29 @@ def allowed_path(path, tag, state_path):
     return path == state_path or bool(re.fullmatch(prefix + '(?:' + views + '|' + stream + ')', path))
 
 
+def pending_after_check(problem, ids, current, tag):
+    """Read THIS publisher's just-appended attempts, in append order.
+
+    A peer's clock may be ahead or equal. A timestamp-sorted global last check
+    must not erase the work this invocation actually left deferred.
+    """
+    if not ids:
+        return {}
+    attempts = {}
+    for line in rectification.ledger_path(problem, tag).read_text().splitlines():
+        event = json.loads(line)
+        if event['event'] == 'check':
+            attempts[event['id']] = event
+    pending = {}
+    for cid in ids:
+        event = attempts.get(cid)
+        if not event or event['hash'] != current[cid]['hash']:
+            raise PublicationError('missing current publisher attempt')
+        if event['state'] == 'deferred':
+            pending[cid] = current[cid]['hash']
+    return pending
+
+
 def publish(root, output, before=None, retry=(), push=True, sync_issues=False):
     root, output = Path(root).resolve(), Path(output).resolve()
     if output == root or root in output.parents:
@@ -122,9 +145,7 @@ def publish(root, output, before=None, retry=(), push=True, sync_issues=False):
         current = claims.load(problem, include_remote=True)[0]
         next_state['problems'][rel] = {
             'versions': {cid: c['hash'] for cid, c in current.items()},
-            'pending': {cid: current[cid]['hash'] for cid in ids
-                        if current[cid]['comparison_check'] and
-                        current[cid]['comparison_check']['state'] == 'deferred'}}
+            'pending': pending_after_check(problem, ids, current, tag)}
         claims.regenerate(problem)
         (problem / "notebook").mkdir(exist_ok=True)
         run.regenerate_index(problem)
