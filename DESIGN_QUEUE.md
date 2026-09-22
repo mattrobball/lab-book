@@ -275,3 +275,23 @@ mutation.
    exact heads when establishing the canonical starting revision.
 
 The full target architecture and acceptance criteria are in `DESIGN_V3.md`.
+
+
+### Topology correction (Investigator, 2026-09-22)
+
+The service remains the sole Git writer, but **branches are retained as the separation
+mechanism**. The earlier wording that collapsed active work into one canonical branch
+was too strong.
+
+- `lab/<tag>` remains one durable stream per investigator, written only by the service
+  on that investigator's authenticated behalf.
+- service-generated comparison/advisory events may use a separate automation stream.
+- clients, workers and CI still have no Git write credentials.
+- one serialized integration runner is the **only writer to `main`**.
+- integration pins exact stream heads; streams may continue advancing while an
+  integration is in progress, with later commits entering the next cycle.
+- `main` is the integrated record, while branches preserve independent provenance
+  and avoid unnecessarily serializing unrelated work.
+
+This replaces decision 2 in this section and refines decisions 1, 5 and 8. The full
+corrected topology is in `DESIGN_V3.md`.
