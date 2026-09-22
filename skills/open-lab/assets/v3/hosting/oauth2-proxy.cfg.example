@@ -1,0 +1,24 @@
+# OAuth2 Proxy 7.15.x; replace LAB_HOST, GITHUB_ORG, OAUTH_CLIENT_ID.
+provider = "github"
+client_id = "OAUTH_CLIENT_ID"
+client_secret_file = "/etc/lab-book/oauth-client-secret"
+cookie_secret_file = "/etc/lab-book/oauth-cookie-secret"
+github_org = "GITHUB_ORG"
+email_domains = ["*"]
+redirect_url = "https://LAB_HOST/oauth2/callback"
+http_address = "127.0.0.1:4180"
+reverse_proxy = true
+trusted_proxy_ips = ["127.0.0.1"]
+upstreams = ["static://202"]
+set_xauthrequest = true
+pass_access_token = false
+pass_authorization_header = false
+cookie_name = "__Host-lab-book"
+cookie_path = "/"
+cookie_secure = true
+cookie_httponly = true
+cookie_samesite = "lax"
+# No cookie-refresh side channel: short sessions reauthenticate instead.
+cookie_expire = "5m"
+cookie_refresh = "0s"
+# Never add github_users, skip-auth, or bearer-token bypass options.

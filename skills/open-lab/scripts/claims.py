@@ -1297,7 +1297,16 @@ def cmd_set(args):
               "ledger. Recording the file's wording as the claim's text." % cid)
     acknowledged = []
     if target == "verified":
+        # A status promotion cannot smuggle a text revision under an old pair
+        # acknowledgment (or under evidence that checked the old statement).
+        if text_hash(statement, conditions) != c["hash"]:
+            refuse("record the changed statement/conditions as a new proposed claim "
+                   "before verifying it, or restore the committed wording; "
+                   "a promotion cannot revise the acknowledged claim version")
         visible, _ = load(problem, include_remote=True)
+        if visible[cid]["hash"] != c["hash"]:
+            refuse("the visible claim version differs from this branch; reconcile "
+                   "that revision before promoting or acknowledging it")
         conflicts = visible[cid].get("contradictions", [])
         required = {n["key"] for n in conflicts}
         supplied = set(getattr(args, "acknowledge_contradictions", None) or [])

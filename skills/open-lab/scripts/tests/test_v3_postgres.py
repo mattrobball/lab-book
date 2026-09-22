@@ -102,8 +102,60 @@ class PostgreSQLTests(unittest.TestCase):
         view=self.rpc('list_leases',{})['reservations']
         self.assertTrue(any(r['actor']=='bob' for r in view))
 
+    def direct_insert(self, run, payload, deadline="statement_timestamp() + interval '60 seconds'", fail=False):
+        literal=json.dumps(payload).replace("'","''")
+        return self.sql("INSERT INTO lab_book.reservations(run_id,payload,deadline) VALUES ('%s','%s'::jsonb,%s);" % (run,literal,deadline),fail=fail)
+
+    def test_direct_sql_namespace_payload_and_budget_are_table_invariants(self):
+        base=self.payload('R-alice-601')
+        cases=[('R-bob-999',dict(base,run='R-bob-999')),
+               ('R-alice-601',{}), ('R-alice-601',dict(base,actor='bob')),
+               ('R-alice-601',dict(base,run='R-alice-602')),
+               ('R-alice-601',dict(base,budget_seconds=0)),
+               ('R-alice-601',dict(base,budget_seconds=604801)),
+               ('R-alice-601',dict(base,budget_seconds='60')),
+               ('R-alice-601',dict(base,budget_seconds=True)),
+               ('R-alice-601',dict(base,question=['not a statement'])),
+               ('R-alice-601',dict(base,method='   '))]
+        for run,payload in cases:
+            with self.subTest(payload=payload): self.direct_insert(run,payload,fail=True)
+        self.direct_insert('R-alice-601',base,"statement_timestamp() + interval '1 year'",fail=True)
+        self.direct_insert('R-alice-601',base,"statement_timestamp() + interval '30 seconds'",fail=True)
+        self.direct_insert('R-alice-601',base)
+        rows=self.rpc('list_leases',{})['reservations']
+        row=next(r for r in rows if r['run_id']=='R-alice-601')
+        self.assertEqual(row['actor'],'alice');self.assertEqual(row['payload'],base)
+        self.assertEqual(self.rpc('release_lease',{'lease':row['lease'],'run':row['run_id']})['outcome'],'released')
+
+    def test_direct_sql_cannot_rewrite_registered_promise_or_deadline(self):
+        p=self.payload('R-alice-603'); row=self.rpc('take_lease',p)['reservation']
+        self.sql("UPDATE lab_book.reservations SET payload='{}'::jsonb WHERE run_id='R-alice-603';",fail=True)
+        self.sql("UPDATE lab_book.reservations SET started_at=statement_timestamp() WHERE run_id='R-alice-603';",fail=True)
+        self.sql("UPDATE lab_book.reservations SET deadline=deadline+interval '1 second' WHERE run_id='R-alice-603';",fail=True)
+        self.assertEqual(self.rpc('take_lease',p)['reservation'],row)
+
+
     def test_6_no_preemption_renewal_or_public_function_privileges(self):
         names=self.sql("SELECT proname FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace WHERE n.nspname='lab_book' ORDER BY proname;",user='postgres')
         self.assertEqual(names.splitlines(),['list_leases','reap_leases','release_lease','take_lease'])
         self.sql("CREATE ROLE outsider LOGIN PASSWORD 'outsider-fixture';",user='postgres')
         self.rpc('list_leases',{},user='outsider',fail=True)
+
+    def test_z_migrate_actual_alpha1_schema_without_rewriting_live_notices(self):
+        repo = SQL.parents[4]
+        old = subprocess.check_output(['git','show','0a0ac1b3404f731edce6c25ec6280eb36e9c9482:skills/open-lab/assets/v3/reservations.sql'], cwd=repo, text=True)
+        migration = SQL.with_name('migrate-alpha1-alpha2.sql').read_text()
+        # Restore the actual old schema in this disposable service only. The
+        # shared membership role is retained; its original creation is omitted.
+        self.sql('DROP SCHEMA lab_book CASCADE;',user='postgres')
+        self.sql(old.replace('CREATE ROLE lab_book_member NOLOGIN;',''),user='postgres')
+        payload=self.payload('R-alice-701'); row=self.rpc('take_lease',payload)['reservation']
+        self.sql(migration,user='postgres',fail=True)
+        self.assertEqual(self.rpc('take_lease',payload)['reservation'],row)
+        self.rpc('release_lease',{'lease':row['lease'],'run':row['run_id']})
+        self.rpc('reap_leases',{})
+        self.sql(migration,user='postgres')
+        self.rpc('take_lease',self.payload('R-alice-702'))
+        self.direct_insert('R-bob-999',dict(payload,run='R-bob-999'),fail=True)
+        self.direct_insert('R-alice-703',self.payload('R-alice-703'))
+        self.assertEqual(self.sql("SELECT count(*) FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace WHERE n.nspname='lab_book';",user='postgres'),'4')

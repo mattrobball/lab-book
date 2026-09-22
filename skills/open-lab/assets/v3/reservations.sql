@@ -11,12 +11,34 @@ CREATE TABLE lab_book.reservations (
   actor name NOT NULL DEFAULT current_user,
   run_id text NOT NULL CHECK (run_id ~ '^R-([a-z0-9-]+-)?[0-9]+$'),
   payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
-  started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   deadline timestamptz NOT NULL,
   released_at timestamptz,
   UNIQUE (actor, run_id),
   CHECK (deadline > started_at)
 );
+-- These constraints also govern DIRECT SQL, not just RPC entry points.
+ALTER TABLE lab_book.reservations ADD CONSTRAINT notice_actor_namespace CHECK (
+  (actor::text ~ '^[a-z0-9][a-z0-9-]*$'
+   AND run_id ~ ('^R-' || actor::text || '-[0-9]+$')) IS TRUE);
+ALTER TABLE lab_book.reservations ADD CONSTRAINT notice_payload_identity CHECK (
+  (jsonb_typeof(payload->'run') = 'string' AND payload->>'run' = run_id
+   AND (NOT payload ? 'actor' OR
+        (jsonb_typeof(payload->'actor') = 'string' AND payload->>'actor' = actor::text))) IS TRUE);
+ALTER TABLE lab_book.reservations ADD CONSTRAINT notice_complete_promise CHECK (
+  (jsonb_typeof(payload->'question_id') = 'string' AND length(btrim(payload->>'question_id')) > 0
+   AND jsonb_typeof(payload->'question') = 'string' AND length(btrim(payload->>'question')) > 0
+   AND jsonb_typeof(payload->'method') = 'string' AND length(btrim(payload->>'method')) > 0
+   AND jsonb_typeof(payload->'model') = 'string' AND length(btrim(payload->>'model')) > 0
+   AND jsonb_typeof(payload->'expected_claim_shape') = 'string' AND length(btrim(payload->>'expected_claim_shape')) > 0
+   AND jsonb_typeof(payload->'problem') = 'string' AND length(btrim(payload->>'problem')) > 0) IS TRUE);
+ALTER TABLE lab_book.reservations ADD CONSTRAINT notice_budget CHECK (
+  (jsonb_typeof(payload->'budget_seconds') = 'number'
+   AND payload->>'budget_seconds' ~ '^[0-9]+$'
+   AND (payload->>'budget_seconds')::numeric BETWEEN 1 AND 604800) IS TRUE);
+ALTER TABLE lab_book.reservations ADD CONSTRAINT notice_exact_deadline CHECK (
+  (deadline = started_at + make_interval(secs => (payload->>'budget_seconds')::integer)) IS TRUE);
+
 ALTER TABLE lab_book.reservations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lab_book.reservations FORCE ROW LEVEL SECURITY;
 CREATE POLICY notice_read ON lab_book.reservations FOR SELECT TO lab_book_member USING (true);
@@ -53,7 +75,7 @@ BEGIN
   END IF;
   -- Idempotent reannouncement preserves the ORIGINAL promise and deadline.
   INSERT INTO lab_book.reservations(run_id, payload, deadline)
-    VALUES (p->>'run', p, clock_timestamp() + make_interval(secs => seconds))
+    VALUES (p->>'run', p, statement_timestamp() + make_interval(secs => seconds))
     ON CONFLICT (actor, run_id) DO NOTHING;
   SELECT * INTO STRICT r FROM lab_book.reservations
     WHERE actor = current_user AND run_id = p->>'run';

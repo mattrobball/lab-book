@@ -68,7 +68,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rectification
 import reservations
-import replay as confined_replay
+# v3 assets are copied even by the alpha.1 upgrade command. A new top-level
+# module would be omitted by that old command's fixed KIT_FILES list.
+import importlib.util as _module_util
+_replay_path = Path(__file__).resolve().parent / "v3" / "replay.py"
+if not _replay_path.exists():
+    _replay_path = Path(__file__).resolve().parents[1] / "assets" / "v3" / "replay.py"
+_replay_spec = _module_util.spec_from_file_location("lab_book_replay", _replay_path)
+confined_replay = _module_util.module_from_spec(_replay_spec)
+_replay_spec.loader.exec_module(confined_replay)
 import claims                                    # noqa: E402  (sibling script)
 from claims import (refuse, now, today, host, git, git_out, git_root,   # noqa: E402
                     lab_root, lab_config, investigators, joined, slug,
@@ -2896,7 +2904,6 @@ def cmd_waive_review(args):
 # What a lab holds a copy of, and where the kit keeps the original.
 KIT_FILES = (("run.py", "scripts/run.py"), ("claims.py", "scripts/claims.py"),
              ("rectification.py", "scripts/rectification.py"),
-             ("replay.py", "scripts/replay.py"),
              ("reservations.py", "scripts/reservations.py"),
              ("board.py", "scripts/board.py"),
              ("v3", "assets/v3"),

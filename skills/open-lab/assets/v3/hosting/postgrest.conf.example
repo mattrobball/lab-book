@@ -1,0 +1,8 @@
+# PostgREST 16.x. Separate authenticator: NOINHERIT, no table-owner/BYPASSRLS.
+db-uri = "service=lab-book-authenticator sslmode=verify-full"
+db-schemas = "lab_book"
+server-host = "127.0.0.1"
+server-port = 3000
+jwt-secret = "@/etc/lab-book/postgrest-jwt-secret"
+jwt-aud = "lab-book"
+# Deliberately no db-anon-role. Grant authenticator only provisioned member roles.

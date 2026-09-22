@@ -135,6 +135,31 @@ class RectificationTests(LabCase):
         self.assertEqual(k[a]['history'][-1]['acknowledged_contradictions'][0]['key'],key)
         self.assertEqual(k[b]['status'],'proposed')
 
+    def test_promotion_rejects_old_acknowledgment_after_statement_or_condition_edit(self):
+        a=self.new('The invariant is two.')
+        b=self.new('The invariant is three.')
+        key=self.compare(a,b,scores(.01,.99))
+        rid,_=self.dispatch()
+        self.packet(rid,command="python3 -c \"print('CHECK_OK' if 1+2 == 3 else 'BAD')\"")
+        self.ok('ingest',rid,'--worker-done')
+        page=self.problem/'claims'/(a+'.md')
+        original=page.read_text()
+        ledger_before=(self.problem/'claims/ledger.jsonl').read_bytes()
+        args=['set',a,'verified','--actor','reviewer','--evidence',rid,'--rests-on','none',
+              '--acknowledge-contradictions',key]
+        page.write_text(original.replace('The invariant is two.','The invariant is four.'))
+        response=self.script(CLAIMS,*args)
+        self.assertEqual(response.returncode,2,response.stdout+response.stderr)
+        self.assertIn('claim version',response.stderr)
+        self.assertEqual((self.problem/'claims/ledger.jsonl').read_bytes(),ledger_before)
+        page.write_text(original)
+        response=self.script(CLAIMS,*args,'--conditions','Only for a different object.')
+        self.assertEqual(response.returncode,2,response.stdout+response.stderr)
+        self.assertEqual((self.problem/'claims/ledger.jsonl').read_bytes(),ledger_before)
+        # Unchanged text remains promotable with its exact current acknowledgment.
+        self.claims_py(*args)
+        self.assertEqual(self.known()[a]['history'][-1]['acknowledged_contradictions'][0]['key'],key)
+
     def test_real_canary_dispatch_ingest_with_mock_jev_at_ingest(self):
         a=self.new('The sum of zero through three is six.')
         k=self.known()
