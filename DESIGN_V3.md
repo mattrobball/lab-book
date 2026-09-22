@@ -1,340 +1,359 @@
-# v3 — single-writer lab service
+# v3 — service-owned Git branches
 
-Status: redesign, not implemented. This supersedes the multi-writer v3 design and
-the repair architecture in which investigators wrote research branches while CI
-wrote a publication branch. Those implementations remain useful evidence, but they
-are not the target architecture.
+Status: redesign, not implemented. This supersedes both the original multi-writer v3
+implementation and the first single-main redesign.
 
-The central decision is simple:
+The central decision is:
 
-> **Git is the permanent record, but Git is not the client write protocol. The lab
-> service is the only writer to the canonical Git repository.**
+> **Git remains the durable record and branch structure remains the separation
+> mechanism. The lab service is the only Git writer. A single integration runner is
+> the only writer to `main`.**
 
 Investigators, Directors, browser clients, CI, and workers do not push lab-record
-commits. They submit typed operations to the service. The service validates each
-operation against the current record, commits the accepted mutation, and returns the
-resulting record revision.
+commits. They submit typed operations to the service. The service writes those
+operations to the appropriate service-owned branch. A separate serialized integration
+runner advances `main`.
 
-## Why change the architecture
+## Why this middle ground
 
-The previous v3 split Git mutation between investigators and automation. That made
-correctness depend on coordinating independent Git writers. The review found the
-fundamental failure: a successful CI commit could advance an investigator branch and
-make the investigator's next normal push diverge.
+The reviewed v3 failed because investigator processes and automation were independent
+Git writers. The fix is not to eliminate branches; branches are useful precisely
+because they separate concurrent streams.
 
-Moving CI metadata to a separate branch repaired that specific race, but it left Git
-branch topology doing work that the service is better placed to do. Once a trusted
-service already authenticates actors, validates operations, owns shared state, and
-writes some durable events, partial Git ownership adds complexity without adding a
-useful trust boundary.
+The clean boundary is:
 
-The redesign removes that split.
+- **many logical streams;**
+- **one Git-writing service;**
+- **one main-integration runner.**
+
+This preserves the federated-notebook model without giving every investigator a Git
+credential or making clients solve push races.
+
+## Branch topology
+
+### Investigator branches
+
+Each investigator keeps a durable branch:
+
+```
+lab/alice
+lab/bob
+lab/carol
+```
+
+The branch still represents that investigator's notebook and work stream. IDs,
+provenance, run ownership and independent conclusions retain investigator identity.
+
+The difference from 2.x is ownership: **Alice does not push `lab/alice`; the service
+does, on Alice's authenticated behalf.**
+
+The service serializes mutations to each branch, so two Alice clients cannot race a
+Git push. Bob's work proceeds independently on `lab/bob`.
+
+### Automation branch
+
+Service-generated durable advisory events may have their own stream, for example:
+
+```
+lab/automation
+```
+
+This can contain version-bound comparison results and other machine-authored durable
+observations. It contains no human claim-status decisions.
+
+Automation is separated because its provenance and lifecycle differ from an
+investigator notebook, not because a second process needs Git write access. The same
+service creates these commits.
+
+### Main
+
+`main` is the integrated lab record.
+
+Only the **integration runner** may advance it. No investigator branch, browser client,
+CI job, or ordinary service request pushes directly to `main`.
+
+The runner reads the current heads of all active service-owned branches and integrates
+them in a deterministic, serialized operation. Straightforward independent additions
+can be integrated automatically. Semantic conflicts remain explicit agenda items and
+require the existing human ruling/meeting mechanism before the runner records the
+resolution on `main`.
+
+The integration runner may be a mode of the same service deployment, but it has a
+distinct Git capability: ordinary service workers can advance stream branches; only
+the runner can advance `main`.
 
 ## Ownership
 
-### The service owns every durable mutation
+### The service owns every Git commit
 
-The service is the sole remote Git writer for the lab record. It owns:
+The service is the only holder of Git write credentials for active lab branches. It
+creates commits for:
 
-- run preregistration / dispatch records;
-- ingest and void records;
-- run artifacts and retained transcripts;
-- claim creation and every claim-status event;
+- run preregistration / dispatch;
+- ingest and void;
+- retained run artifacts and transcripts;
+- claim creation and claim-status events;
 - contradiction acknowledgments and dismissals;
-- investigator notes and meeting decisions;
+- notes and meeting decisions;
 - automated comparison/check events;
-- generated human-readable views;
-- shared configuration and explicit kit upgrades.
+- generated branch-local views;
+- explicit shared configuration or upgrade operations.
 
-The authenticated human or agent remains the **actor** of the operation. The service
-is the Git writer/committer. Actor identity is recorded in the event itself and in the
-operation receipt; Git credentials are never used as proof of who made a mathematical
-decision.
+The authenticated person or agent remains the **actor** recorded in the event.
+The service is the Git committer. Git identity is not used as proof of who made a
+mathematical decision.
 
-### Clients own computation, not the record
+### Clients own computation, not Git mutation
 
-A Director or human client may:
+Clients may read/fetch the repository, prepare work, launch workers, collect packets,
+and submit typed operations. They do not need Git write credentials.
 
-- read/fetch the canonical record;
-- prepare a brief;
-- run workers locally;
-- collect a returned packet;
-- submit typed operations to the service;
-- keep arbitrary local scratch state.
-
-A client does not need write credentials for the Git remote and does not make a
-canonical commit. Local scratch commits, if someone uses them, have no lab-record
-meaning.
+A local clone may contain arbitrary scratch edits or local commits, but those have no
+lab-record status until represented by an accepted service operation.
 
 ### CI is read-only
 
-CI verifies releases, exercises the service, and may render disposable artifacts.
-It does not commit lab state, comparison results, generated views, or checkpoints.
-There is no CI publication branch in the target architecture.
-
-## The permanent record
-
-The service writes one canonical branch, initially **main**. Branch topology is no
-longer the model of disagreement.
-
-The canonical branch contains the whole durable lab record, including conflicting
-claims, open contradictions, failed runs, and human rulings. Consensus is represented
-by claim status and meeting/ruling events, not by whether a fact has been merged into
-a special branch.
-
-Per-investigator branches from the 2.x design become legacy read-only history. The
-investigator tag remains useful in IDs and provenance, but no longer exists to prevent
-Git writer collisions.
-
-Each accepted mutation is one atomic record transaction: all authoritative event
-changes, retained artifacts, and derived Markdown that belong to that operation land
-in one service-created commit. A cascade of claim-status changes is one operation and
-one commit.
+CI tests the software and may render disposable artifacts. It does not mutate lab Git.
+There is no CI publication branch written by GitHub Actions.
 
 ## Operation protocol
 
 Every mutation request carries:
 
-- a globally unique client request ID / idempotency key;
-- the authenticated actor;
-- the operation type and typed payload;
-- the record revision the client observed when that matters.
+- a unique request ID / idempotency key;
+- authenticated actor identity;
+- operation type and typed payload;
+- the branch/stream implied by that actor or operation;
+- the branch revision observed by the client when relevant.
 
-For an accepted operation the service:
+For an accepted investigator operation the service:
 
-1. authenticates the caller and maps it to an investigator identity;
-2. reads the current canonical Git HEAD;
-3. checks whether the request ID is already present;
-4. validates the operation against current state;
-5. performs any required sandboxed validation;
-6. writes the authoritative event/artifact transaction;
-7. regenerates affected derived views;
-8. creates a service commit;
-9. fast-forward pushes the canonical branch;
-10. returns the commit SHA as the durable receipt.
+1. authenticates the caller;
+2. maps the operation to the caller's `lab/<tag>` stream;
+3. reads that branch's current head plus any required integrated/reference state;
+4. checks whether the request ID was already accepted;
+5. validates the operation against current state;
+6. performs any required confined validation;
+7. writes the authoritative event/artifact transaction;
+8. regenerates affected branch-local derived views;
+9. creates one service commit;
+10. fast-forward pushes only that stream branch;
+11. returns its commit SHA as the durable receipt.
 
-There is no force push and no automatic rebase of record history.
+Machine-authored comparisons follow the same process on the automation stream.
 
-A retry with the same request ID is idempotent. If the push succeeded but the response
-was lost, the service finds the already-recorded request and returns the same durable
-result rather than repeating the operation.
+No force push and no automatic history rewrite.
 
-The service does not acknowledge a durable mutation as complete until the canonical
-Git remote contains the commit. PostgreSQL caches may accelerate idempotency lookup,
-but Git is sufficient to reconstruct the answer after those caches are lost.
+Retries are idempotent. If the push succeeded but the response was lost, the same
+request ID returns the already-recorded result.
+
+## Integration protocol
+
+The integration runner is the sole writer to `main`.
+
+An integration cycle:
+
+1. snapshots `main` and all active stream heads;
+2. verifies that every candidate head descends from the last integrated point for that
+   stream, or explicitly identifies a migration/divergence;
+3. folds the append-only records across the selected stream heads;
+4. regenerates the integrated views;
+5. detects semantic conflicts requiring a human ruling;
+6. if no unresolved ruling blocks integration, creates the integration commit;
+7. fast-forward pushes `main`;
+8. records the exact source stream heads integrated.
+
+The runner does **not** require investigators to stop working. New commits can land on
+their branches while an integration is in progress; those simply belong to the next
+cycle because the current cycle is pinned to exact head SHAs.
+
+A human meeting/ruling can itself be submitted as a typed service operation to a
+meeting stream or designated investigator stream and then integrated by the runner.
+The runner records decisions; it does not invent them.
 
 ## Concurrency
 
-The service serializes Git mutation. There is one logical commit queue for the
-canonical record.
+Concurrency is separated at two levels.
 
-Serialization does not mean every request blindly succeeds on the newest HEAD.
-Operations that depend on a particular observed state use optimistic validation:
+**Within a branch:** the service serializes mutations, eliminating client push races.
 
-- claim status changes must still apply to the exact claim version the caller saw;
-- contradiction acknowledgment must name the current pair versions;
-- closing a run must match its current owner and state;
-- a stale operation that is no longer valid is refused with the current revision.
+**Across branches:** Git branches permit Alice and Bob to progress independently. The
+integration runner later combines their exact heads into `main`.
 
-Append-like operations may be accepted after revalidation even if another commit
-landed first.
+This is preferable to serializing every durable mutation globally: unrelated work need
+not wait merely because it belongs to a different investigator.
 
-This moves concurrency control from Git push races into a typed application boundary,
-where the lab's actual invariants are visible.
+Operations that depend on current mathematical state still use optimistic validation.
+For example:
+
+- a claim-status change must bind to the exact claim version the actor saw;
+- contradiction acknowledgment must name current pair versions;
+- closing a run must match its owner/current state;
+- a stale operation is refused rather than silently applied to newer text.
 
 ## Runs
 
 ### Dispatch
 
-A normal run begins with a service operation. The service:
+Dispatch is a typed service operation on the investigator's branch. The service commits
+the preregistration before returning the run information. PostgreSQL then receives the
+soft in-flight notice.
 
-- allocates/validates the run ID;
-- records the brief hash, question, method, model, expected claim shape and budget;
-- commits that preregistration;
-- announces soft in-flight state in PostgreSQL;
-- returns the durable commit revision and run information.
-
-Only then does the client launch the worker.
-
-This makes preregistration genuinely prior to the experiment instead of a local commit
-that may or may not reach the remote.
+Only after the durable branch commit succeeds does the client launch the worker.
 
 ### Worker execution
 
-Workers may run on investigator machines or other execution hosts. They receive only
-the inputs and environment intended for the worker. They do not receive Git, database,
-model-provider, or service-writer credentials.
+Workers run without Git/database/provider/service-writer credentials.
 
 ### Ingest
 
-The client uploads the returned packet to the service. The service, not the Director
-process, performs the authoritative ingest validation and replay in a confined
-environment. It then commits the verdict, replay evidence, retained packet/transcript,
-and any proposed claims as one durable transaction.
+The returned packet is submitted to the service. Authoritative replay/validation runs
+behind the service boundary in confinement. The verdict, packet evidence, transcript
+and proposed claims land atomically on the investigator's branch.
 
-A late result is still real evidence. Expired/missing notice state may mark it
-unsolicited but does not invalidate an otherwise valid packet.
-
-## Service availability
-
-This redesign intentionally changes the old failure model.
-
-**The service is required for new canonical mutations.** In particular, a normal new
-dispatch cannot be durably preregistered while the service is unavailable.
-
-Already-dispatched workers may continue computing while the service is down, and their
-packets can be retained locally and submitted when it returns. Read-only work can
-continue from a fetched record. A future offline submission queue may improve this,
-but clients do not bypass the service by pushing Git directly.
-
-This is the cost of having one mutation authority instead of several partially
-coordinated writers.
+A late result remains evidence. Missing/stale notice state may mark it unsolicited but
+does not invalidate it.
 
 ## PostgreSQL
 
-PostgreSQL is internal service state, not a client-facing source of truth.
-
-It holds high-churn/rebuildable state such as:
+PostgreSQL is private soft/rebuildable service state:
 
 - in-flight notices and deadlines;
-- presence/session information;
-- operation scheduling and caches;
-- materialized lookup indexes.
+- presence/session data;
+- scheduling and queues;
+- caches and materialized lookup indexes.
 
-Losing PostgreSQL must not lose an accepted mathematical fact or accepted experiment.
-The service can rebuild durable operation identity and lab state from Git.
+Clients do not connect directly to PostgreSQL. Browser and agent writes use the same
+service API.
 
-Clients do not receive direct database credentials. Browser and agent requests use the
-same service authentication boundary. PostgreSQL row policies may remain as
-defense-in-depth for service-selected actor roles, but they are not a second public API.
+Losing PostgreSQL must not lose an accepted durable fact. The durable branch histories
+allow reconstruction of accepted operations and comparison work.
 
-No preemption, heartbeat, or renewal is introduced. Notices remain advisory and
-nonexclusive.
+No preemption, heartbeat or renewal is introduced. Notices remain nonexclusive.
 
 ## Rectification
 
-Claim comparison remains advisory. The four raw judgments are unchanged:
+The four raw comparison judgments remain unchanged:
 
 - `same_claim`;
 - `contradictory`;
 - `first_entails_second`;
 - `second_entails_first`.
 
-The service schedules comparison work after a claim version enters the durable record.
-Ingest does not wait on a paid or unavailable model service.
+Comparison work is scheduled by the service after durable claims appear. Results are
+committed by the service to the automation stream, version-bound with provenance.
 
-Comparison coverage is derivable: a claim version with visible nonterminal peers and
-no comparison event for a pair is pending/deferred. Therefore a lost PostgreSQL queue
-can be reconstructed from Git.
+The integration runner brings those advisory events into the integrated view. Model
+output never changes claim status. Human dismissals/promotions/refutations/
+supersessions remain separately authenticated service operations.
 
-When comparison completes, the service writes another canonical commit containing the
-version-bound raw scores and provenance. Model output never changes claim status.
-Human dismissals, promotions, refutations, and supersessions are separate authenticated
-service operations.
-
-GitHub Issues may mirror open adjudications for discussion, but an issue is not
-authoritative. A ruling becomes real only when the service commits the corresponding
-record event.
+GitHub Issues may mirror adjudications for discussion, but they are not authoritative.
 
 ## Board
 
-The board is a read view over:
+The board reads:
 
-- canonical Git state for durable claims/runs/rulings/comparisons;
-- PostgreSQL for current in-flight notices.
+- `main` for the latest integrated durable state;
+- optionally newer stream heads when presenting "since last integration" activity;
+- PostgreSQL for live in-flight notices.
 
-Browser writes go to the same service API as CLI/agent writes. There is no separate
-PostgREST mutation path and no separate browser-to-database identity bridge.
-
-The board may request: announce/release work, submit rulings, or other explicitly
-allowed typed operations. It cannot invent an actor identity, write Git directly, or
-circumvent the same service validation used by CLI clients.
+Board writes are typed service operations. There is no separate browser-to-Postgres
+mutation path.
 
 ## Authentication and authorization
 
-There is one public identity boundary: the service.
+There is one public mutation boundary: the service.
 
-- Human browser authentication maps a verified forge identity to an investigator.
-- Agent credentials map to the same investigator identity.
-- Every operation is authorized in terms of the authenticated actor.
-- The Git remote accepts canonical writes only from the service identity.
-- PostgreSQL and provider credentials remain service-side.
+- browser identity maps to an investigator;
+- agent credentials map to the same investigator;
+- ordinary authenticated operations may advance only their authorized stream;
+- automation jobs may advance only the automation stream;
+- only the integration runner identity may advance `main`;
+- humans, agents and CI have no Git write credentials;
+- PostgreSQL/provider credentials remain service-side.
 
-Branch protection should reject direct writes to the canonical record from humans,
-agents, and CI.
+Repository protections should enforce these distinctions.
 
-## Git as storage, not coordination
+## Git's role
 
-Git still earns its place because it gives the lab:
+Git now does exactly what it is good at:
 
-- immutable, content-addressed history;
-- cheap complete replication;
-- inspectable diffs;
-- durable run/claim artifacts;
-- a repository that remains readable without the service;
-- straightforward backup and archival.
+- immutable content-addressed history;
+- independent append streams through branches;
+- cheap replication and audit;
+- exact source-head snapshots for integration;
+- durable artifacts and provenance;
+- a readable record even without the service.
 
-What Git no longer does is arbitrate concurrent writers. That is the service's job.
+The service handles authenticated mutation. Branches handle separation. The runner
+handles integration.
 
-## Migration from the current v3 branches
+## Availability
+
+The service is required for new **durable** lab mutations. Clients do not bypass an
+outage by pushing Git themselves.
+
+Already-dispatched workers may continue computing and retain packets locally for later
+submission. Read-only work can continue from fetched branches.
+
+Because branches are separate, service recovery does not require reconstructing one
+global mutation queue: each stream resumes from its durable head.
+
+## Migration from current v3
 
 Do not rewrite existing history.
 
-1. Preserve all existing investigator, implementation and publication refs read-only.
-2. Choose the reconciled/current record as the service's canonical starting revision.
-3. Commit a migration event that records every imported legacy head SHA and the
-   migration policy.
-4. Enable branch protection so only the service may advance the canonical branch.
-5. Remove Git write credentials from investigators, agents and lab CI.
-6. Configure clients to submit mutations to the service.
-7. Keep legacy refs available for audit; they are not active write streams.
+1. Preserve current investigator and publication refs.
+2. Establish the service as the only Git credential holder for active lab streams.
+3. Retain/create `lab/<tag>` as the active investigator streams.
+4. Convert durable automation output to a service-owned automation stream.
+5. Record the imported head SHA for every stream.
+6. Configure the integration runner as the sole writer to `main`.
+7. Remove Git write credentials from humans, agents and CI.
+8. Run one pinned integration cycle and record exactly which heads entered `main`.
 
-Any divergent legacy facts that have not been reconciled are imported or ruled on
-explicitly before the old write paths are disabled; migration must not silently choose
-between them.
+Existing divergent material is reconciled explicitly; migration must not silently
+choose a branch.
 
 ## Build order
 
-1. **Single-writer core.** Authenticated typed operation envelope, idempotency,
-   current-HEAD validation, atomic commit construction, fast-forward publication and
-   durable receipts.
-2. **Claims and notes.** Move permanent `claims.py`/note mutations behind service
-   operations while retaining current policy semantics.
-3. **Run lifecycle.** Service-owned preregistration, packet upload, confined replay,
-   ingest/void and artifact retention.
-4. **Coordination.** Move notice access behind the service; Postgres becomes private
-   soft state.
-5. **Rectification.** Service-owned asynchronous comparison scheduling and commits;
-   issue synchronization becomes a derived integration.
-6. **Board.** Read/write through the same authenticated API.
-7. **Migration.** Import legacy heads, protect the canonical branch, remove direct
-   writer credentials, and run a multi-client pilot.
+1. **Service Git writer.** Typed operations, authentication, idempotency and
+   fast-forward mutation of service-owned investigator branches.
+2. **Integration runner.** Exact-head snapshotting, deterministic folding, semantic
+   conflict detection, and sole-writer advancement of `main`.
+3. **Claims and notes.** Move permanent local CLI mutations behind service operations.
+4. **Run lifecycle.** Service-owned preregistration, confined replay, ingest/void and
+   artifact retention.
+5. **Coordination.** Put notice access behind the service; keep PostgreSQL private.
+6. **Rectification.** Service-owned automation stream and issue mirroring.
+7. **Board.** Read integrated plus live state and write through the same API.
+8. **Migration/pilot.** Remove direct Git writers and run several concurrent clients.
 
 ## Acceptance criteria
 
-The redesign is complete only when all of these are true:
+The redesign is complete when:
 
-- two investigators can mutate the lab concurrently without either having Git write
-  credentials;
-- every accepted durable operation returns a canonical commit SHA;
-- retrying an accepted request cannot create a second commit;
-- service restart and PostgreSQL loss cannot erase an accepted record;
-- stale-state claim/status operations are rejected rather than applied to new text;
+- two investigators can commit durable work concurrently without Git credentials;
+- their service-owned branches advance independently;
+- every accepted operation returns the exact stream commit SHA;
+- retries cannot duplicate an accepted operation;
+- only the integration runner can advance `main`;
+- an integration commit records the exact stream heads it incorporated;
+- a stream may advance during integration without corrupting that integration;
+- stale mathematical operations are rejected against newer versions;
+- PostgreSQL loss cannot erase accepted durable records;
 - worker/replay execution cannot access service credentials;
-- CI has no Git mutation permission for lab state;
-- direct pushes to the canonical branch are rejected for non-service identities;
-- the full record remains intelligible from a read-only clone;
-- service unavailability never causes a client to silently create an alternate
-  canonical Git history.
+- CI has no lab-state Git mutation permission;
+- the whole record remains understandable from a read-only clone;
+- service outage never creates an alternate client-written Git history.
 
-## Deliberately unchanged mathematical policy
+## Deliberately unchanged policy
 
-The redesign changes ownership and transport, not the mathematical decision rules:
+This redesign changes ownership and Git topology, not mathematical decision rules:
 
 - no preemption;
-- duplicate/contradiction model outputs are advisory;
-- raw probabilities and provenance are retained;
-- open contradictions may be promoted only with explicit current-version
-  acknowledgment;
+- model outputs are advisory;
+- raw probabilities/provenance are retained;
+- open contradictions require explicit current-version acknowledgment for promotion;
 - models do not make claim-status decisions;
 - human rulings remain attributable and durable.
