@@ -1,0 +1,151 @@
+diff --git a/skills/open-lab/scripts/claims.py b/skills/open-lab/scripts/claims.py
+index 63ccc69..0940162 100755
+--- a/skills/open-lab/scripts/claims.py
++++ b/skills/open-lab/scripts/claims.py
+@@ -1297,7 +1297,16 @@ def cmd_set(args):
+               "ledger. Recording the file's wording as the claim's text." % cid)
+     acknowledged = []
+     if target == "verified":
++        # A status promotion cannot smuggle a text revision under an old pair
++        # acknowledgment (or under evidence that checked the old statement).
++        if text_hash(statement, conditions) != c["hash"]:
++            refuse("record the changed statement/conditions as a new proposed claim "
++                   "before verifying it, or restore the committed wording; "
++                   "a promotion cannot revise the acknowledged claim version")
+         visible, _ = load(problem, include_remote=True)
++        if visible[cid]["hash"] != c["hash"]:
++            refuse("the visible claim version differs from this branch; reconcile "
++                   "that revision before promoting or acknowledging it")
+         conflicts = visible[cid].get("contradictions", [])
+         required = {n["key"] for n in conflicts}
+         supplied = set(getattr(args, "acknowledge_contradictions", None) or [])
+diff --git a/skills/open-lab/scripts/run.py b/skills/open-lab/scripts/run.py
+index 5c3de7d..4fe4f90 100644
+--- a/skills/open-lab/scripts/run.py
++++ b/skills/open-lab/scripts/run.py
+@@ -68,7 +68,15 @@ from pathlib import Path
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ import rectification
+ import reservations
+-import replay as confined_replay
++# v3 assets are copied even by the alpha.1 upgrade command. A new top-level
++# module would be omitted by that old command's fixed KIT_FILES list.
++import importlib.util as _module_util
++_replay_path = Path(__file__).resolve().parent / "v3" / "replay.py"
++if not _replay_path.exists():
++    _replay_path = Path(__file__).resolve().parents[1] / "assets" / "v3" / "replay.py"
++_replay_spec = _module_util.spec_from_file_location("lab_book_replay", _replay_path)
++confined_replay = _module_util.module_from_spec(_replay_spec)
++_replay_spec.loader.exec_module(confined_replay)
+ import claims                                    # noqa: E402  (sibling script)
+ from claims import (refuse, now, today, host, git, git_out, git_root,   # E402
+                     lab_root, lab_config, investigators, joined, slug,
+@@ -2896,7 +2904,6 @@ def cmd_waive_review(args):
+ # What a lab holds a copy of, and where the kit keeps the original.
+ KIT_FILES = (("run.py", "scripts/run.py"), ("claims.py", "scripts/claims.py"),
+              ("rectification.py", "scripts/rectification.py"),
+-             ("replay.py", "scripts/replay.py"),
+              ("reservations.py", "scripts/reservations.py"),
+              ("board.py", "scripts/board.py"),
+              ("v3", "assets/v3"),
+diff --git a/skills/open-lab/scripts/tests/test_v3.py b/skills/open-lab/scripts/tests/test_v3.py
+index 369a04f..2f17c4b 100644
+--- a/skills/open-lab/scripts/tests/test_v3.py
++++ b/skills/open-lab/scripts/tests/test_v3.py
+@@ -135,6 +135,31 @@ class RectificationTests(LabCase):
+         self.assertEqual(k[a]['history'][-1]['acknowledged_contradictions'][0]['key'],key)
+         self.assertEqual(k[b]['status'],'proposed')
+ 
++    def test_promotion_rejects_old_acknowledgment_after_statement_or_condition_edit(self):
++        a=self.new('The invariant is two.')
++        b=self.new('The invariant is three.')
++        key=self.compare(a,b,scores(.01,.99))
++        rid,_=self.dispatch()
++        self.packet(rid,command="python3 -c \"print('CHECK_OK' if 1+2 == 3 else 'BAD')\"")
++        self.ok('ingest',rid,'--worker-done')
++        page=self.problem/'claims'/(a+'.md')
++        original=page.read_text()
++        ledger_before=(self.problem/'claims/ledger.jsonl').read_bytes()
++        args=['set',a,'verified','--actor','reviewer','--evidence',rid,'--rests-on','none',
++              '--acknowledge-contradictions',key]
++        page.write_text(original.replace('The invariant is two.','The invariant is four.'))
++        response=self.script(CLAIMS,*args)
++        self.assertEqual(response.returncode,2,response.stdout+response.stderr)
++        self.assertIn('claim version',response.stderr)
++        self.assertEqual((self.problem/'claims/ledger.jsonl').read_bytes(),ledger_before)
++        page.write_text(original)
++        response=self.script(CLAIMS,*args,'--conditions','Only for a different object.')
++        self.assertEqual(response.returncode,2,response.stdout+response.stderr)
++        self.assertEqual((self.problem/'claims/ledger.jsonl').read_bytes(),ledger_before)
++        # Unchanged text remains promotable with its exact current acknowledgment.
++        self.claims_py(*args)
++        self.assertEqual(self.known()[a]['history'][-1]['acknowledged_contradictions'][0]['key'],key)
++
+     def test_real_canary_dispatch_ingest_with_mock_jev_at_ingest(self):
+         a=self.new('The sum of zero through three is six.')
+         k=self.known()
+diff --git a/skills/open-lab/scripts/tests/test_v3_postgres.py b/skills/open-lab/scripts/tests/test_v3_postgres.py
+index 8453e66..4bf5b51 100644
+--- a/skills/open-lab/scripts/tests/test_v3_postgres.py
++++ b/skills/open-lab/scripts/tests/test_v3_postgres.py
+@@ -102,8 +102,60 @@ class PostgreSQLTests(unittest.TestCase):
+         view=self.rpc('list_leases',{})['reservations']
+         self.assertTrue(any(r['actor']=='bob' for r in view))
+ 
++    def direct_insert(self, run, payload, deadline="statement_timestamp() + interval '60 seconds'", fail=False):
++        literal=json.dumps(payload).replace("'","''")
++        return self.sql("INSERT INTO lab_book.reservations(run_id,payload,deadline) VALUES ('%s','%s'::jsonb,%s);" % (run,literal,deadline),fail=fail)
++
++    def test_direct_sql_namespace_payload_and_budget_are_table_invariants(self):
++        base=self.payload('R-alice-601')
++        cases=[('R-bob-999',dict(base,run='R-bob-999')),
++               ('R-alice-601',{}), ('R-alice-601',dict(base,actor='bob')),
++               ('R-alice-601',dict(base,run='R-alice-602')),
++               ('R-alice-601',dict(base,budget_seconds=0)),
++               ('R-alice-601',dict(base,budget_seconds=604801)),
++               ('R-alice-601',dict(base,budget_seconds='60')),
++               ('R-alice-601',dict(base,budget_seconds=True)),
++               ('R-alice-601',dict(base,question=['not a statement'])),
++               ('R-alice-601',dict(base,method='   '))]
++        for run,payload in cases:
++            with self.subTest(payload=payload): self.direct_insert(run,payload,fail=True)
++        self.direct_insert('R-alice-601',base,"statement_timestamp() + interval '1 year'",fail=True)
++        self.direct_insert('R-alice-601',base,"statement_timestamp() + interval '30 seconds'",fail=True)
++        self.direct_insert('R-alice-601',base)
++        rows=self.rpc('list_leases',{})['reservations']
++        row=next(r for r in rows if r['run_id']=='R-alice-601')
++        self.assertEqual(row['actor'],'alice');self.assertEqual(row['payload'],base)
++        self.assertEqual(self.rpc('release_lease',{'lease':row['lease'],'run':row['run_id']})['outcome'],'released')
++
++    def test_direct_sql_cannot_rewrite_registered_promise_or_deadline(self):
++        p=self.payload('R-alice-603'); row=self.rpc('take_lease',p)['reservation']
++        self.sql("UPDATE lab_book.reservations SET payload='{}'::jsonb WHERE run_id='R-alice-603';",fail=True)
++        self.sql("UPDATE lab_book.reservations SET started_at=statement_timestamp() WHERE run_id='R-alice-603';",fail=True)
++        self.sql("UPDATE lab_book.reservations SET deadline=deadline+interval '1 second' WHERE run_id='R-alice-603';",fail=True)
++        self.assertEqual(self.rpc('take_lease',p)['reservation'],row)
++
++
+     def test_6_no_preemption_renewal_or_public_function_privileges(self):
+         names=self.sql("SELECT proname FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace WHERE n.nspname='lab_book' ORDER BY proname;",user='postgres')
+         self.assertEqual(names.splitlines(),['list_leases','reap_leases','release_lease','take_lease'])
+         self.sql("CREATE ROLE outsider LOGIN PASSWORD 'outsider-fixture';",user='postgres')
+         self.rpc('list_leases',{},user='outsider',fail=True)
++
++    def test_z_migrate_actual_alpha1_schema_without_rewriting_live_notices(self):
++        repo = SQL.parents[4]
++        old = subprocess.check_output(['git','show','0a0ac1b3404f731edce6c25ec6280eb36e9c9482:skills/open-lab/assets/v3/reservations.sql'], cwd=repo, text=True)
++        migration = SQL.with_name('migrate-alpha1-alpha2.sql').read_text()
++        # Restore the actual old schema in this disposable service only. The
++        # shared membership role is retained; its original creation is omitted.
++        self.sql('DROP SCHEMA lab_book CASCADE;',user='postgres')
++        self.sql(old.replace('CREATE ROLE lab_book_member NOLOGIN;',''),user='postgres')
++        payload=self.payload('R-alice-701'); row=self.rpc('take_lease',payload)['reservation']
++        self.sql(migration,user='postgres',fail=True)
++        self.assertEqual(self.rpc('take_lease',payload)['reservation'],row)
++        self.rpc('release_lease',{'lease':row['lease'],'run':row['run_id']})
++        self.rpc('reap_leases',{})
++        self.sql(migration,user='postgres')
++        self.rpc('take_lease',self.payload('R-alice-702'))
++        self.direct_insert('R-bob-999',dict(payload,run='R-bob-999'),fail=True)
++        self.direct_insert('R-alice-703',self.payload('R-alice-703'))
++        self.assertEqual(self.sql("SELECT count(*) FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace WHERE n.nspname='lab_book';",user='postgres'),'4')
