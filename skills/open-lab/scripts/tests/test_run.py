@@ -637,7 +637,7 @@ class TestSpine(LabCase):
         self.assertIn(self.entries()[1][:-3],
                       (self.problem / "notebook" / "INDEX.md").read_text())
 
-    def test_near_duplicate_claim_warns(self):
+    def test_unavailable_comparison_is_deferred_not_word_overlap(self):
         self.claims_py("new", "--statement",
                        "The largest cap in AG(4,3) has 20 points.",
                        "--actor", "director")
@@ -645,7 +645,8 @@ class TestSpine(LabCase):
         self.packet(rid, ret={"claims_proposed":
                               ["The largest cap in AG(4,3) has 20 points."]})
         r = self.ok("ingest", rid)
-        self.assertIn("looks close to C-001", r.stdout)
+        self.assertNotIn("looks close to C-001", r.stdout)
+        self.assertIn("deferred", r.stdout)
         self.assertIn("C-002", r.stdout)
 
     def test_open_runs_listed_by_catchup(self):
@@ -1471,18 +1472,32 @@ class TestTranscripts(LabCase):
 class TestDuplicateWarningLifecycle(LabCase):
 
     def test_warning_persists_until_the_claim_moves(self):
-        self.claims_py("new", "--statement",
-                       "The largest cap in AG(4,3) has 20 points.",
-                       "--actor", "director")
-        rid, _ = self.dispatch()
-        self.packet(rid, ret={"claims_proposed":
-                              ["The largest cap in AG(4,3) has 20 points."]})
-        self.ok("ingest", rid)
+        import claims
+        import rectification
+        statement = "The largest cap in AG(4,3) has 20 points."
+        self.claims_py("new", "--statement", statement, "--actor", "director")
+        pair = [{'id': cid, 'hash': claims.text_hash(statement, '')}
+                for cid in ('C-001', 'C-002')]
+        key = rectification.pair_key(*pair)
+        # Only the model call is mocked; dispatch, replay, ledger, catchup and
+        # supersession remain the real command paths. No lexical substitute.
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / 'jev.json'
+            fixture.write_text(json.dumps({key: dict(zip(rectification.FIELDS,
+                                                        (.99, .01, .98, .98)))}))
+            cfg = self.local()
+            cfg['rectification'] = {'mock_responses': str(fixture)}
+            self.write_local(cfg)
+            rid, _ = self.dispatch()
+            self.packet(rid, ret={"claims_proposed": [statement]})
+            self.ok("ingest", rid)
         cid = self.ingest_json(rid)["claims"][0]
-        self.assertIn("duplicate warning", self.ok("catchup", "2020-01-01").stdout)
+        for _ in range(2):
+            self.assertIn("duplicate-candidate-of",
+                          self.ok("catchup", "2020-01-01").stdout)
         self.claims_py("set", cid, "superseded", "--actor", "director",
                        "--by", "C-001")
-        self.assertNotIn("duplicate warning",
+        self.assertNotIn("duplicate-candidate-of",
                          self.ok("catchup", "2020-01-01").stdout)
 
 

@@ -1,6 +1,6 @@
 # v3 — a lab several people and agents work in at once
 
-Status: design, not built. The decisions behind it are in `DESIGN_QUEUE.md` §3,
+Status: minimal first pass on the implementation branch; see `V3_IMPLEMENTATION.md` for implemented scope and verification. The decisions behind it are in `DESIGN_QUEUE.md` §3,
 with the date each was taken. This page is the specification.
 
 ## What is different
@@ -140,7 +140,7 @@ list. Three bands:
   against budget. What the reservation promised, beside what came back.
 - **Just landed** — recent ingests, verdicts, status moves.
 
-The board writes reservations — take, release, preempt — and marks a pair adjudicated.
+The board writes notices — take and release the caller's own — and hands adjudication to issues and the claim CLI in this first pass. There is no preemption (Investigator correction, 2026-09-22).
 It never writes claim status.
 
 **One identity, two paths.** An agent authenticates as a Postgres role; a person in the

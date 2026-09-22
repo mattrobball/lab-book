@@ -1,0 +1,67 @@
+name: Kit tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-fixture
+          POSTGRES_DB: labbook_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d labbook_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTHONPATH: skills/open-lab/scripts
+      LAB_BOOK_TEST_POSTGRES: postgresql://postgres:disposable-fixture@localhost:5432/labbook_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: PostgreSQL client
+        run: |
+          if ! command -v psql; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Record source identity
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source.sha
+          git archive HEAD | gzip > evidence/source.tar.gz
+          sha256sum evidence/source.tar.gz > evidence/source.sha256
+          python --version > evidence/python.txt
+          git --version > evidence/git.txt
+          psql --version > evidence/postgres-client.txt
+      - name: Regression suite including native PostgreSQL
+        run: |
+          printf '%s\n' 'PYTHONPATH=skills/open-lab/scripts python -m unittest discover -s skills/open-lab/scripts/tests -v' > evidence/command.txt
+          set +e
+          python -m unittest discover -s skills/open-lab/scripts/tests -v > evidence/tests.stdout 2> evidence/tests.stderr
+          result=$?
+          printf '%s\n' "$result" > evidence/tests.exit
+          cat evidence/tests.stdout
+          cat evidence/tests.stderr
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kit-evidence-${{ github.sha }}
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
