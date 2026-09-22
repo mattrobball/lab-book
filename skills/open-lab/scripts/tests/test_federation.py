@@ -423,8 +423,8 @@ class TestMeeting(FederationCase):
         out = r.stdout
         self.assertIn("Agenda", out)
         self.assertIn("STATUS.md", out)
-        self.assertIn("state the same thing in two streams", out)
-        self.assertIn("superseded", out)
+        self.assertNotIn("state the same thing in two streams", out)
+        self.assertIn("comparison deferred", (self.problem(self.alice) / "CLAIMS.md").read_text())
         agenda = self.alice / "notebook" / "meetings"
         self.assertEqual(len([p for p in agenda.iterdir()
                               if p.name.endswith("-agenda.md")]), 1)

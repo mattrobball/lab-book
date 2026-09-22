@@ -1,5 +1,11 @@
 # Lab Book
 
+**v3 first pass (3.0.0-alpha.1):** advisory claim comparisons, notice-only
+reservations, and a private static board. See `V3_IMPLEMENTATION.md` and
+`skills/open-lab/assets/v3/README.md`. Jev behavior is mocked, not a live paid
+service. Nothing has been deployed to a lab host. The existing lab workflow
+and evidence rules below remain in force.
+
 A coding agent is a program that runs a language model in your terminal and
 lets it read files, write files, and run commands. This package turns one into
 a research lab. The model in your session becomes the **Director**: it writes

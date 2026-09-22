@@ -203,7 +203,7 @@ def check_new(problem, ids, tag=None, judge=None):
             if key in cache:
                 # A cached MOCK can exercise mock behavior only. It must not
                 # suppress a later live judge's comparison of the same text.
-                if source == 'unavailable' or cache[key]['source'] == source:
+                if cache[key]['source'] == source:
                     coverage['cached'] += 1
                     continue
             if key in attempted:

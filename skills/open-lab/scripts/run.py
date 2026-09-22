@@ -66,6 +66,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rectification
+import reservations
 import claims                                    # noqa: E402  (sibling script)
 from claims import (refuse, now, today, host, git, git_out, git_root,   # noqa: E402
                     lab_root, lab_config, investigators, joined, slug,
@@ -1499,11 +1501,14 @@ def cmd_new(args):
         "command": (role.get("command") or "").replace(
             "{prompt}", "%s/PROMPT.md" % rundir_rel) or None,
     }
+    reservations.preregister(root, problem, dispatch, body)
     write_json(rundir / "dispatch.json", dispatch)
     commit(root, [rundir_rel, rel(brief, root), ".gitignore", claims.IDS_DIR],
            "%s dispatched to %s" % (rid, model))
     print("%s — model %s, timeout %ss, may write: %s"
           % (rid, model, args.timeout, ", ".join(allowed)))
+    for notice in reservations.notices(dispatch):
+        print(notice)
     if duplicate_of:
         print("Recorded as a deliberate duplicate of %s (read from %s). "
               "Catchup names the pair until the original is closed."
@@ -1953,6 +1958,8 @@ def cmd_ingest(args):
                                                     args.transcript),
                     "verdict": verdict, "replayed": False,
                     "validation": None,
+                    "lease": d.get("lease"),
+                    "reservation_outcome": reservations.release(root, d),
                     "headline": "filed without ingest: " + reasons[0],
                     "claims": [], "refused_for": reasons,
                     "warnings": ["filed with --record-broken: nothing in this "
@@ -2060,13 +2067,11 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
 
     allocated = []
     for statement in ret["claims_proposed"]:
-        dupes = near_duplicates(problem, statement)
         cid = allocate_claim(problem, statement, actor, tag, d.get("model"))
         allocated.append((cid, statement))
-        if dupes:
-            warnings.append("%s looks close to %s already on file — read them "
-                            "side by side before either is promoted"
-                            % (cid, ", ".join(dupes)))
+    comparison = rectification.check_new(problem, [cid for cid, _ in allocated], tag) if allocated else None
+    if comparison and (comparison["deferred"] or comparison["source"] == "mock"):
+        warnings.append("Comparison coverage: " + json.dumps(comparison, sort_keys=True))
 
     steps_notes = []
     if allocated and ret.get("steps_of"):
@@ -2133,6 +2138,9 @@ def ingest_transaction(args, problem, root, rid, rundir, d, tag, actor):
               "validation": ret["validation"], "replay": replay,
               "claims": [c for c, _ in allocated], "warnings": warnings,
               "entry": rel(entry, root), "reviewed": ret.get("reviewed") or []}
+    record["comparison"] = comparison
+    record["lease"] = d.get("lease")
+    record["reservation_outcome"] = reservations.release(root, d)
     write_json(rundir / "ingest.json", record)
     d.update(status="ingested", verdict=verdict, ingested_at=record["ts"],
              replayed=replayed)
@@ -2422,6 +2430,12 @@ def cmd_catchup(args):
               "hook is in its place). Hand commits can sweep open runs into "
               "the history; merge the lab's hook in.")
 
+    visible, _ = claims.load(problem, include_remote=True)
+    for notice in rectification.summary(visible):
+        print("- " + notice)
+    flight = reservations.rpc(root, "list_leases", {"problem": str(problem.relative_to(root))})
+    print("\nReservations: " + (json.dumps(flight["reservations"], sort_keys=True)
+          if flight.get("available") else "unavailable; not evidence that nobody is working"))
     status_report(problem)
     baseline_report(problem, root)
     catchup_lints(problem, root)
@@ -2726,6 +2740,7 @@ def cmd_void(args):
         refuse("%s has a packet. Ingest it, or file it with `run.py ingest %s "
                "--record-broken` — void is only for runs that produced "
                "nothing." % (rid, rid))
+    d["reservation_outcome"] = reservations.release(root, d)
     d.update(status="void", verdict="VOID", ingested_at=now(),
              void_reason=args.reason)
     write_json(run_dir(problem, rid) / "dispatch.json", d)
@@ -2877,6 +2892,10 @@ def cmd_waive_review(args):
 
 # What a lab holds a copy of, and where the kit keeps the original.
 KIT_FILES = (("run.py", "scripts/run.py"), ("claims.py", "scripts/claims.py"),
+             ("rectification.py", "scripts/rectification.py"),
+             ("reservations.py", "scripts/reservations.py"),
+             ("board.py", "scripts/board.py"),
+             ("v3", "assets/v3"),
              ("templates", "assets/templates"),
              ("GLOSSARY.md", "assets/GLOSSARY.md"),
              ("AGENTS.md", "assets/AGENTS.md"))
@@ -3020,7 +3039,7 @@ def cmd_upgrade(args):
     cfg = claims.shared_config(root)
     cfg["kit_version"] = new_version
     claims.write_config(root / claims.SHARED_CONFIG, cfg)
-    paths = [name for name, _ in KIT_FILES] + ["lab.json"]
+    paths = [name for name, _ in KIT_FILES if (root / name).exists()] + ["lab.json"]
     problem = upgrade_note_problem(root)
     if problem is not None:
         entry = file_entry(problem, "Lab scripts upgraded: kit %s -> %s"
@@ -3283,7 +3302,7 @@ def conflict_kind(path):
     name = Path(path).name
     if name in GENERATED_NAMES or CLAIM_PAGE.match(name):
         return "generated"
-    if name.startswith("ledger") and name.endswith(".jsonl"):
+    if name.startswith(("ledger", "rectification")) and name.endswith(".jsonl"):
         return "ledger"
     if name in HAND_PAGES:
         return "page"
@@ -3499,10 +3518,10 @@ def agenda_items(root, base, base_time, pages, date, tags):
             for b in order[i + 1:]:
                 if id_tag(a) == id_tag(b):
                     continue
-                if not similar(known[a]["statement"], known[b]["statement"]):
+                if b not in {n["other"] for n in known[a].get("duplicate-candidate-of", [])}:
                     continue
                 items.append((
-                    "%s and %s state the same thing in two streams. The room "
+                    "%s and %s are duplicate candidates in two streams. The room "
                     "picks which one survives; the other is superseded by it, "
                     "and neither direction is the default.\n%s (%s): \"%s\"\n"
                     "%s (%s): \"%s\""

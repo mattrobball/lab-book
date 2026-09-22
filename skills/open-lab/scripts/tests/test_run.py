@@ -637,7 +637,7 @@ class TestSpine(LabCase):
         self.assertIn(self.entries()[1][:-3],
                       (self.problem / "notebook" / "INDEX.md").read_text())
 
-    def test_near_duplicate_claim_warns(self):
+    def test_unavailable_comparison_is_deferred_not_word_overlap(self):
         self.claims_py("new", "--statement",
                        "The largest cap in AG(4,3) has 20 points.",
                        "--actor", "director")
@@ -645,7 +645,8 @@ class TestSpine(LabCase):
         self.packet(rid, ret={"claims_proposed":
                               ["The largest cap in AG(4,3) has 20 points."]})
         r = self.ok("ingest", rid)
-        self.assertIn("looks close to C-001", r.stdout)
+        self.assertNotIn("looks close to C-001", r.stdout)
+        self.assertIn("deferred", r.stdout)
         self.assertIn("C-002", r.stdout)
 
     def test_open_runs_listed_by_catchup(self):
