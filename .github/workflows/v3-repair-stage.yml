@@ -2,7 +2,7 @@ name: V3 repair staging (temporary)
 on:
   push:
     branches: ['repair/v3-review-fixes-20260922']
-    paths: ['maintenance/v3-repair-payload.txt']
+    paths: ['maintenance/v3-repair-payload.txt', 'maintenance/v3-repair-corrections.json']
 permissions:
   contents: write
 jobs:
@@ -36,7 +36,15 @@ jobs:
           python - <<'PY'
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
           assert os.environ['GITHUB_REPOSITORY'] == 'mattrobball/lab-book'
-          p = json.loads(zlib.decompress(base64.b64decode(pathlib.Path('maintenance/v3-repair-payload.txt').read_text())))
+          text = pathlib.Path('maintenance/v3-repair-payload.txt').read_text()
+          correction = pathlib.Path('maintenance/v3-repair-corrections.json')
+          if correction.exists():
+              c = json.loads(correction.read_text())
+              assert hashlib.sha256(text.encode()).hexdigest() == c['bad_sha256']
+              for start, end, replacement in reversed(c['edits']):
+                  text = text[:start] + replacement + text[end:]
+              assert hashlib.sha256(text.encode()).hexdigest() == c['good_sha256']
+          p = json.loads(zlib.decompress(base64.b64decode(text)))
           subprocess.run(['git', 'apply', '--check', '-'], input=p['patch'].encode(), check=True)
           subprocess.run(['git', 'apply', '--index', '-'], input=p['patch'].encode(), check=True)
           manifest = []
