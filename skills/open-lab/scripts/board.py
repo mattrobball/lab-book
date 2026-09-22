@@ -184,10 +184,14 @@ def render_problem(problem, output, api=True):
                  (html.escape(c['conditions'] or 'None stated.'), html.escape(', '.join(c['rests_on']) or 'Nothing.'))]
         for notice in rectification.summary({cid: c}):
             body.append('<p class="notice">%s</p>' % html.escape(notice))
-        if c['comparison_check'] is None:
-            body.append('<p>Comparison coverage: not checked.</p>')
-        elif c['comparison_check']['source'] == 'mock':
-            body.append('<p class="notice">MOCK comparison coverage — not a live Jev judgment.</p>')
+        coverage = c['comparison_coverage']
+        if coverage['state'] == 'excluded':
+            body.append('<p>Terminal claim: excluded from current comparison coverage.</p>')
+        else:
+            body.append('<p>Current comparison coverage: %d / %d visible peers assessed.</p>' %
+                        (coverage['compared'], coverage['peers']))
+            if coverage['mock']:
+                body.append('<p class="notice">MOCK comparison coverage — %d pair(s), not live Jev judgments.</p>' % coverage['mock'])
         for event in c['history']:
             if event.get('cascade_from') or event.get('acknowledged_contradictions'):
                 body.append('<p>Recorded change: %s</p>' % html.escape(json.dumps(event, sort_keys=True)))

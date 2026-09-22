@@ -233,3 +233,46 @@ class IssueTests(unittest.TestCase):
             self.assertEqual(method,'PATCH'); updates.append(body); return dict(item,**body)
         board.sync_issues('owner/repo',[{'key':key,'title':'new','body':fresh}],request)
         self.assertEqual(updates,[{'title':'new','body':fresh+'Human ruling in progress.','state':'open'}])
+
+
+class CoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.known = {cid: {'id': cid, 'hash': cid, 'status': 'proposed'}
+                      for cid in ('C-001', 'C-002')}
+        self.pair = list(self.known.values())
+        self.event = {'event': 'comparison', 'key': rx.pair_key(*self.pair),
+                      'pair': [dict(c) for c in self.pair],
+                      'probabilities': scores(), 'source': 'mock'}
+
+    def test_current_coverage_not_historical_attempt_counts(self):
+        attempt = {'event': 'check', 'id': 'C-001', 'state': 'complete', 'compared': 0}
+        coverage = rx.current_coverage(self.known, [attempt])
+        self.assertEqual(coverage['C-001']['deferred'], 1)
+        self.assertEqual(attempt['state'], 'complete')
+        self.known['C-002']['status'] = 'superseded'
+        coverage = rx.current_coverage(self.known, [attempt])
+        self.assertEqual(coverage['C-001']['deferred'], 0)
+        self.assertEqual(coverage['C-002']['state'], 'excluded')
+
+    def test_negative_and_dismissed_judgments_still_cover_pair(self):
+        dismissal = {'event': 'dismiss', 'key': self.event['key'], 'kind': 'contradiction'}
+        coverage = rx.current_coverage(self.known, [self.event, self.event, dismissal])
+        for c in coverage.values():
+            self.assertEqual((c['peers'], c['compared'], c['deferred'], c['mock']), (1, 1, 0, 1))
+
+    def test_changed_version_and_new_peer_need_fresh_coverage(self):
+        self.known['C-003'] = {'id': 'C-003', 'hash': 'fresh', 'status': 'proposed'}
+        coverage = rx.current_coverage(self.known, [self.event])
+        self.assertEqual(coverage['C-001']['deferred'], 1)
+        self.assertEqual(coverage['C-003']['deferred'], 2)
+        self.known['C-002']['hash'] = 'changed'
+        self.assertEqual(rx.current_coverage(self.known, [self.event])['C-001']['deferred'], 2)
+
+    def test_unknown_peer_cannot_fill_current_coverage(self):
+        other = {'id': 'C-unseen-001', 'hash': 'unseen', 'status': 'proposed'}
+        event = dict(self.event, pair=[self.pair[0], other], key=rx.pair_key(self.pair[0], other))
+        self.assertEqual(rx.current_coverage(self.known, [event])['C-001']['compared'], 0)
+
+    def test_corrupt_comparison_identity_is_rejected(self):
+        with self.assertRaises(ValueError):
+            rx.current_coverage(self.known, [dict(self.event, key='forged')])

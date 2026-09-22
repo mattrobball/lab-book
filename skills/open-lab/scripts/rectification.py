@@ -138,9 +138,43 @@ def active_pairs(known, events):
     return result
 
 
+def current_coverage(known, events):
+    """Derive coverage against today's visible peers, without making any calls.
+
+    Historical attempt counts stay on record, but cannot describe a later merge
+    or a terminal peer. Work is linear in claims plus retained comparisons, not
+    an all-pairs scan. A dismissal does not erase the fact a pair was assessed.
+    """
+    live = {cid: c for cid, c in known.items() if c['status'] not in TERMINAL}
+    latest = {r['key']: r for r in events if r['event'] == 'comparison'}
+    covered = {cid: {} for cid in live}
+    for key, rec in latest.items():
+        pair = rec['pair']
+        if len(pair) != 2 or pair[0]['id'] == pair[1]['id'] or pair_key(*pair) != key:
+            raise ValueError('invalid comparison identity')
+        probabilities(rec['probabilities'])
+        if any(c['id'] not in live or live[c['id']]['hash'] != c['hash'] for c in pair):
+            continue
+        a, b = [c['id'] for c in pair]
+        covered[a][b] = rec['source']
+        covered[b][a] = rec['source']
+    result = {}
+    for cid in known:
+        sources = list(covered.get(cid, {}).values())
+        peers = max(0, len(live) - 1) if cid in live else 0
+        missing = peers - len(sources)
+        result[cid] = {'state': ('excluded' if cid not in live else
+                                 'deferred' if missing else 'complete'),
+                       'peers': peers, 'compared': len(sources), 'deferred': missing,
+                       'mock': sources.count('mock'), 'sources': sorted(set(sources))}
+    return result
+
+
 def attach(problem, known, include_remote=False):
     events = records(problem, include_remote)
-    for c in known.values():
+    coverage = current_coverage(known, events)
+    for cid, c in known.items():
+        c['comparison_coverage'] = coverage[cid]
         c['duplicate-candidate-of'] = []
         c['contradictions'] = []
         c['adjudication'] = []
@@ -244,13 +278,15 @@ def summary(known):
     lines = []
     for cid in sorted(known):
         c = known[cid]
+        if c['status'] in TERMINAL:
+            continue
         for field in ('contradictions', 'duplicate-candidate-of', 'adjudication'):
             for flag in c.get(field, []):
                 lines.append('%s %s %s [%s; pair %s]' %
                              (cid, field, flag['other'], flag['source'], flag['key']))
-        check = c.get('comparison_check')
-        if check and check['state'] == 'deferred':
-            lines.append('%s: comparison deferred (%s pairs)' % (cid, check['deferred']))
+        coverage = c.get('comparison_coverage')
+        if coverage and coverage['state'] == 'deferred':
+            lines.append('%s: comparison deferred (%s current pairs)' % (cid, coverage['deferred']))
     return lines
 
 

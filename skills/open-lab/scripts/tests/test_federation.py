@@ -407,6 +407,7 @@ class TestMeeting(FederationCase):
         git(clone, "push", "-q", "origin", self.branch(clone))
 
     def test_reconcile_merges_agrees_and_fast_forwards_every_branch(self):
+        import claims
         self.join(self.alice)
         self.join(self.bob)
         self.work(self.alice, headline="Alice counted them.",
@@ -448,7 +449,7 @@ class TestMeeting(FederationCase):
             "# Status: demo\n\n## Bottom line\n\nWhat the room agreed.\n")
         copy.unlink()
         self.claims_ok(self.alice, "set", "C-bob-001", "superseded",
-                       "--by", "C-alice-001", "--actor", "meeting today (alice,bob)",
+                       "--by", "C-alice-001", "--actor", "meeting %s (alice,bob)" % claims.today(),
                        "--problem", str(self.problem(self.alice)))
         r = self.ok(self.alice, "reconcile", "--close", "--present", "alice,bob",
                     cwd=self.alice)
@@ -462,6 +463,7 @@ class TestMeeting(FederationCase):
         filed = note[0].read_text()
         self.assertIn("**Present:** Alice (alice), Bob (bob)", filed)
         self.assertIn("C-bob-001", filed)
+        self.assertIn("superseded", filed)
         # Every branch now starts from main, here and on the remote.
         head = git(self.alice, "rev-parse", "main").stdout.strip()
         for ref in ("lab/alice", "origin/main", "origin/lab/alice",
