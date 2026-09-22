@@ -1,0 +1,84 @@
+name: V3 repair staging (temporary)
+on:
+  push:
+    branches: ['repair/v3-review-fixes-20260922']
+    paths: ['maintenance/v3-repair-payload.txt']
+permissions:
+  contents: write
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-fixture
+          POSTGRES_DB: labbook_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d labbook_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Materialize and upload exact Git blobs only (no refs)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p evidence
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
+          assert os.environ['GITHUB_REPOSITORY'] == 'mattrobball/lab-book'
+          p = json.loads(zlib.decompress(base64.b64decode(pathlib.Path('maintenance/v3-repair-payload.txt').read_text())))
+          subprocess.run(['git', 'apply', '--check', '-'], input=p['patch'].encode(), check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=p['patch'].encode(), check=True)
+          manifest = []
+          for path, expected in sorted(p['expected'].items()):
+              assert path.startswith(('skills/open-lab/', '.github/workflows/')) and '..' not in pathlib.PurePosixPath(path).parts
+              data = pathlib.Path(path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == expected, path
+              body = json.dumps({'content': base64.b64encode(data).decode(), 'encoding':'base64'}).encode()
+              req = urllib.request.Request('https://api.github.com/repos/mattrobball/lab-book/git/blobs', data=body, method='POST', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+              with urllib.request.urlopen(req, timeout=30) as response: result=json.load(response)
+              assert result['sha'] == expected
+              mode = subprocess.check_output(['git','ls-files','--stage','--',path],text=True).split()[0]
+              manifest.append({'path':path,'mode':mode,'type':'blob','sha':expected})
+          pathlib.Path('evidence/blob-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          tree=subprocess.check_output(['git','write-tree'],text=True).strip()
+          pathlib.Path('evidence/patched-tree.sha').write_text(tree+'\n')
+          pathlib.Path('evidence/source.sha').write_text(os.environ['GITHUB_SHA']+'\n')
+          with open('evidence/source.tar','wb') as f: subprocess.run(['git','archive',tree],stdout=f,check=True)
+          print(json.dumps({'uploaded_blobs':len(manifest),'patched_tree':tree,'branch_updates':0}))
+          PY
+      - name: Native sandbox and database tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap postgresql-client
+          bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --new-session /bin/true
+      - name: Full patched regression suite (no paid credentials)
+        env:
+          PYTHONPATH: skills/open-lab/scripts
+          LAB_BOOK_TEST_POSTGRES: postgresql://postgres:disposable-fixture@localhost:5432/labbook_test
+        run: |
+          printf '%s\n' 'PYTHONPATH=skills/open-lab/scripts python -m unittest discover -s skills/open-lab/scripts/tests -v' > evidence/command.txt
+          set +e
+          python -m unittest discover -s skills/open-lab/scripts/tests -v > evidence/stdout 2> evidence/stderr
+          result=$?
+          printf '%s\n' "$result" > evidence/exit
+          cat evidence/stdout evidence/stderr
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-stage-${{ github.sha }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
