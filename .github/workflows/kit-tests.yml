@@ -33,17 +33,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Replay confinement
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap
-          bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --new-session /bin/true
-      - name: PostgreSQL client
-        run: |
-          if ! command -v psql; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client
-          fi
       - name: Record source identity
         run: |
           mkdir -p evidence
@@ -52,6 +41,14 @@ jobs:
           sha256sum evidence/source.tar.gz > evidence/source.sha256
           python --version > evidence/python.txt
           git --version > evidence/git.txt
+      - name: Replay confinement
+        run: bash skills/open-lab/integration/prepare-linux-replay.sh
+      - name: PostgreSQL client
+        run: |
+          if ! command -v psql; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
           psql --version > evidence/postgres-client.txt
       - name: Regression suite including native PostgreSQL
         run: |
@@ -68,5 +65,5 @@ jobs:
         with:
           name: kit-evidence-${{ github.sha }}
           path: evidence/
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: error
