@@ -58,3 +58,171 @@ Serial turns are the special case of one active investigator and need no extra r
 3. Only the owner may close (ingest or void) a run. Another lab may *duplicate* it: dispatch the same brief in its own namespace, with `dispatch.json` carrying `duplicates: R-<inv>-NNN` so `reconcile` lists the pair and the stale original stays visible until its owner closes it.
 
 **Rejected alternative — one notebook, serial turns.** `run.py new` fetches and refuses if behind `origin/main` or with unpushed ingests; ingest pushes, and a push failure blocks the next `new` rather than the ingest. Workable, but it is "take turns writing in one notebook": it needs enforcement to stay consistent, blocks the second investigator entirely, and gives disagreement no place to be recorded. Per-investigator branches were also rejected — they move the ID collision to merge time.
+
+## 3. Live collaboration — reservations, and a board that shows the work
+
+**Requested 2026-09-22.** Not built. The 1.2.0 federated model (per-person branches,
+reconciled at a meeting) assumes everyone works apart and meets later. This is the
+other mode: half a dozen agents and people working the same problem at the same time,
+seeing each other.
+
+### Failures prevented
+
+- Two agents spend an hour each on the same question because neither could see the
+  other start. Today nothing is visible until ingest.
+- A claim is shaped after the data is seen, and nothing on record shows what the run
+  set out to test.
+- A run goes quiet and nobody notices until catchup the next morning.
+- The same statement arrives twice and `near_duplicates` only warns, at ingest, to
+  one person's terminal.
+- The lab's state is readable only by running scripts in a clone. A collaborator who
+  wants to see where things stand has to become an operator first.
+
+### Design
+
+**Three substrates, by job.**
+
+1. *Facts stay in git.* Claims, runs, ledgers, transcripts. Unchanged. The record is
+   what is committed.
+2. *Reservations live in Postgres* on the group's cloud host. Never truth, only who is
+   working on what. If the host is unreachable, agents work anyway and reconcile
+   later — a reservation is an optimization, never a gate.
+3. *Adjudication lives in GitHub Issues*, opened by CI. A duplicate pair needs
+   discussion and a decision with an author; that is what an issue is for.
+
+**A reservation is a preregistration.** Taken before the run starts, it names the
+question, the method, the actor, the model, the expected claim shape, and the time
+budget. It earns its keep with one person working alone — it is the record of what a
+run set out to test — so it is not only a collision-avoidance device.
+
+**What is built, and nothing more.** A schema and four SQL functions: `take_lease`,
+`renew`, `release`, `reap`. No API server. Agents connect to Postgres directly, one
+role per person, over TLS; Postgres authentication is the authentication, and it
+revokes cleanly. Row-level security confines a person to their own rows.
+
+**Renewal requires progress, not a heartbeat.** An agent that pings forever while
+stuck is the failure a plain liveness check cannot see.
+
+**Every dispatch and ingest carries its lease number.** An agent pauses inside a long
+model call, the lease expires, a successor takes the question. When the first returns,
+its packet is not rejected — the work is real. It is filed as unsolicited, and if a
+successor covered the same ground, the pair goes to rectification.
+
+**Duplicates are not waste.** Two agents that independently reach the same claim,
+neither aware of the other, are the second actor the promotion rule already demands.
+Rectification promotes the pair as independent corroboration; it discards nothing.
+
+**The similarity test is replaced.** `similar()` in `run.py` compares normalized word
+sets at 0.6 overlap and warns at ingest. Measured 2026-09-22 against 2003 claim
+statements drawn from two live labs:
+
+- On 120 pairs built by swapping one number word in a real statement — different
+  claims by construction — the word-overlap rule called all 120 duplicates. No
+  threshold repairs this: those pairs score 0.85 to 1.00, and some score exactly 1.00,
+  because changing a number can leave the word set unchanged.
+- Of the 36 pairs it flags across those labs, 16 are not duplicates.
+- It misses real duplicates below its threshold, and it has no notion of two claims
+  contradicting each other.
+
+The replacement is four independent yes/no judgments asked in one System One call
+(TypeSafe's Jev, `typesafe-sdk`): `same_claim`, `contradictory`,
+`first_entails_second`, `second_entails_first`. Raw probabilities are recorded; the
+policy stays in code. On the same 120 constructed pairs it answered 116 correctly.
+Real duplicates return `same_claim` above 0.9 and genuinely ambiguous pairs in the
+middle, so: above 0.9 CI acts, 0.5 to 0.9 goes to the adjudication queue, below 0.5 is
+dropped. Roughly 700 input tokens per pair, hundreds of pairs in seconds, so it runs
+on every pair at every ingest rather than in batches.
+
+**The contradiction threshold is 0.7.** Measured 2026-09-22 against 113 pairs built by
+editing 45 real statements one word at a time — a changed asserted value, a weakening,
+or a changed subject — with the variants written by a different model from the one
+judging them. At 0.7 every one of the 30 real contradictions is caught, no weakening is
+mistaken for one, and 93% of weakenings come back correctly as a one-way entailment.
+The cost is 15% of different-subject pairs — the same sentence about a different object
+— read as contradictory. Raising the bar to 0.9 clears those but loses a quarter of the
+real contradictions, which is the wrong trade: a false one costs a reader a minute and
+the dismissal is recorded so it never fires again, while a missed one is what the check
+exists to prevent. An earlier attempt to build this set by regular expression failed and
+is worth remembering — it could not tell an asserted value from a quantifier bound or a
+subject qualifier, which is the exact judgment under test, so it labelled 27 weakenings
+as contradictions and 74 contradictions as controls.
+
+**Contradiction is the higher-priority output.** It costs nothing extra in the same
+call, and a first pass found 18 contradictory pairs already sitting in those two labs'
+records — a rough count, since at the measured false-positive rate three or four of
+them are likely different-subject pairs rather than genuine conflicts.
+Two runs reaching opposite conclusions is more urgent than two reaching the same one,
+and the word-overlap test scores those two cases identically. The lab has no mechanism
+for this today.
+
+**The board.** A static site rendered by CI on push, served from the cloud host behind
+oauth2-proxy with GitHub as the identity provider — org membership is the access list.
+Three bands:
+
+- *Believed* — the claims and their statuses, from the ledger fold. The dependency
+  graph, coloured by status, with the cone that fell when something was demoted. The
+  conditional list and what each is waiting on. This is the band that is unreadable as
+  text today.
+- *In flight* — from Postgres, joined to the graph on claim or question ID, so a node
+  can be lit as under attack by two agents. Who, which method, which model, elapsed
+  against budget. What the reservation promised, beside what came back.
+- *Just landed* — recent ingests, verdicts, status moves.
+
+Lease expiry surfaces here as a real signal — a run that went quiet — rather than as
+plumbing.
+
+### Decisions (Investigator, 2026-09-22)
+
+1. Postgres is self-installed on the group's cloud host, not managed. The lease table
+   is soft state; the durability a managed service sells is durability this design
+   deliberately does not need, and everything that must survive is in git or GitHub.
+2. The board writes reservations — take, release, preempt — and marks a duplicate pair
+   adjudicated. It never writes claim status. That stays with `claims.py` and lands as
+   a commit, so the record remains what is committed.
+3. CI may set `duplicate-candidate-of` itself above 0.9. It is a flag, not a status: it
+   promotes nothing and demotes nothing, and a wrong one costs a reader half a minute.
+   Requiring a person for it means the flag is missing exactly when someone needs it.
+   Merging two claims is a status move and stays a person's, through `claims.py`.
+4. The contradiction check runs at ingest, comparing the new claim against every claim
+   on file, with no prefilter — about 2000 calls in the larger lab, a minute at ten
+   threads. The one-time backfill over all existing pairs is dropped: its word-overlap
+   blocking step would have missed contradictions between claims sharing little
+   vocabulary, which is the blind spot the check exists to close.
+5. An open contradiction does not block promotion. Blocking assumed a ruling is always
+   available, but "we do not know yet, dispatch a run" is a legitimate ruling and can
+   take a week. Instead the contradiction is attached to both claims, shows on the
+   claim, in catchup and on the board, and `claims.py set verified` prints it and
+   requires the promoter to acknowledge it explicitly. The promotion is then recorded
+   as having been made over an open contradiction, which is the honest outcome and one
+   a later reader can find.
+6. Ruling on a contradiction is one of four, and three are moves the lab already has:
+   dismiss it as a false positive; refute one claim, letting the cascade carry its
+   dependents; supersede with a sharper claim that states the conditions under which
+   both held; or write a brief and dispatch a run to settle it. Only dismissal is new,
+   and it must be recorded as a ledger event or the flag fires again at every ingest.
+   Rulings happen in the issue CI opened, or at a meeting; either way the decision
+   lands on the ledger as meeting decisions do today.
+
+7. The board's writes reach Postgres through PostgREST. A browser cannot speak the
+   Postgres wire protocol, so the alternative needs a proxy anyway, and PostgREST is
+   that proxy with the row-level security policies the agents already require —
+   rather than a second permission model that can drift from the first. One identity,
+   two paths: a GitHub login maps to the investigator tag, which is the Postgres role,
+   which is the tag already in `R-<tag>-NNN`. Otherwise a person's browser actions and
+   their own agent's actions appear on the record as two different actors.
+8. A reservation has a deadline and no heartbeat. It is taken at dispatch with the
+   brief's budget as its deadline, released at ingest or void, and shown as stale past
+   its deadline with no packet. No renewal, no progress signal, no checkpoints: every
+   in-flight signal considered was either uninformative (bytes written) or a change to
+   the brief template that workers would have to be asked to honour. A dead agent's
+   lease therefore sits until its deadline instead of being reaped early, which at six
+   participants is someone glancing at the board, not a correctness problem.
+
+9. The board carries taken and stale, and nothing else in flight. Revisit only if the
+   three bands prove thin in use.
+
+### Open decisions
+
+1. The 18 contradictions found in the live labs have not been ruled on by anyone who
+   knows the mathematics. Until they are, the measured false-positive rate is the only
+   estimate of how many are real.
