@@ -140,9 +140,14 @@ def command_line(stage, original, home, tmp, command):
         sub = lambda p: '(subpath ' + json.dumps(str(p)) + ')'
         profile = ['(version 1)', '(deny default)', '(allow process-fork)',
                    '(allow process-exec)', '(allow signal (target self))',
-                   '(allow sysctl-read)', '(allow file-read-metadata)',
+                   '(allow sysctl-read (sysctl-name "hw.machine") (sysctl-name "hw.ncpu")'
+                   ' (sysctl-name "hw.memsize") (sysctl-name "hw.pagesize")'
+                   ' (sysctl-name "hw.optional.arm64") (sysctl-name "kern.ostype")'
+                   ' (sysctl-name "kern.osrelease") (sysctl-name "kern.osversion")'
+                   ' (sysctl-name "kern.argmax"))', '(allow file-read-metadata)',
                    '(allow mach-lookup (global-name "com.apple.system.logger"))',
                    '(allow file-read* ' + ' '.join(sub(p) for p in runtime_paths()) + ')',
+                   '(allow file-map-executable ' + ' '.join(sub(p) for p in runtime_paths() + [stage]) + ')',
                    '(allow file-read* file-write* ' + ' '.join(sub(p) for p in (stage,home,tmp)) + ')',
                    '(allow file-read* (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
                    '(allow file-write* (literal "/dev/null"))']

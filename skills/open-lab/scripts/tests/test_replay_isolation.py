@@ -3,11 +3,13 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import replay
+from run import confined_replay as replay
 import run
 from test_run import LabCase, git
 
@@ -91,6 +93,32 @@ subprocess.run([sys.executable,'-c',"import os; assert 'TYPESAFE_API_KEY' not in
 assert sum(range(4)) == 6
 print('CHECK_OK')
 '''.replace('PATHS',repr(paths)).replace('PORT',str(port))
+        if sys.platform == 'darwin':
+            # Verify the OTHER host process's argument/environment interface is
+            # actually readable outside, then denied inside the sandbox. Use
+            # the platform header rather than hard-coded sysctl numbers.
+            src = packet / 'proc_probe.c'
+            src.write_text("""#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc,char **argv) {
+  if (argc != 3) return 2;
+  int mib[3] = {CTL_KERN, KERN_PROCARGS2, atoi(argv[1])};
+  char buf[262144]; size_t len = sizeof(buf);
+  int result = sysctl(mib,3,buf,&len,NULL,0);
+  int denied = result < 0 && (errno == EPERM || errno == EACCES);
+  if (!strcmp(argv[2],"deny")) { if (!denied) return 3; puts("DENIED host process environment"); }
+  else { if (result) return 4; puts("OUTSIDE process read control"); }
+  return 0;
+}
+""")
+            exe=packet/'proc_probe'
+            subprocess.run(['cc',str(src),'-o',str(exe)],check=True,capture_output=True)
+            subprocess.run([str(exe),str(os.getpid()),'allow'],check=True,capture_output=True)
+            code = "import subprocess\nsubprocess.run(['./packet/proc_probe', %r, 'deny'], check=True)\n" % str(os.getpid()) + code
         (packet/'probe.py').write_text(code)
         self.ok('ingest',rid,'--worker-done',env={'HOME':str(private),'TYPESAFE_API_KEY':sentinel,
                 'PGPASSWORD':sentinel,'PGSERVICEFILE':str(private/'.pg_service.conf'),

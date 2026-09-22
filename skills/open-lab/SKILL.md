@@ -4,7 +4,7 @@ description: >-
   Opens a research lab in a repository and keeps it running. In a fresh repository it sets one up — interview the Investigator, discover the machine's tools and the literature, then scaffold the Director charter, the claim and run scripts, and the templates. In a repository that already has one, it picks up where the last session stopped: catchup, writing briefs, dispatching workers, ingesting the packets they return, filing notebook entries, and setting claim status. Trigger on "open the lab", "join the lab at" a git address, "set up a lab here", "where were we", lab notebook, research notebook, claims ledger, claim status, dispatch a run, ingest a packet, catchup, or any repository whose AGENTS.md is a Director charter with claims.py beside it.
 license: MIT
 metadata:
-  version: "3.0.0-alpha.1"
+  version: "3.0.0-alpha.2"
 ---
 
 # Lab book
@@ -106,7 +106,6 @@ Then scaffold the lab repository:
    - `assets/GLOSSARY.md` → `GLOSSARY.md`
    - `scripts/claims.py` → `claims.py`
    - `scripts/run.py` → `run.py`
-   - `scripts/replay.py` → `replay.py`
    - `scripts/rectification.py`, `scripts/reservations.py`, `scripts/board.py` → the same names in the lab root
    - `assets/v3/` → `v3/` (optional host setup and lab CI instructions)
    - `assets/templates/` → `templates/`

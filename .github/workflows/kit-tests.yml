@@ -60,6 +60,15 @@ jobs:
           cat evidence/tests.stdout
           cat evidence/tests.stderr
           exit "$result"
+      - name: Actual alpha.1 upgrade and confined canary
+        run: |
+          printf '%s\n' 'python skills/open-lab/integration/upgrade_contract.py' > evidence/upgrade.command
+          set +e
+          python skills/open-lab/integration/upgrade_contract.py > evidence/upgrade.stdout 2> evidence/upgrade.stderr
+          result=$?
+          echo "$result" > evidence/upgrade.exit
+          cat evidence/upgrade.stdout evidence/upgrade.stderr
+          exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

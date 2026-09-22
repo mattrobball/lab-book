@@ -1,0 +1,47 @@
+name: V3 macOS replay confinement
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native replay and exact first-pass upgrade
+        env:
+          PYTHONPATH: skills/open-lab/scripts:skills/open-lab/scripts/tests
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source.sha
+          git archive HEAD | gzip > evidence/source.tar.gz
+          shasum -a 256 evidence/source.tar.gz > evidence/source.sha256
+          python --version > evidence/python.txt
+          sw_vers > evidence/macos.txt
+          set +e
+          printf '%s\n' 'python -m unittest test_replay_isolation -v' > evidence/replay.command
+          python -m unittest test_replay_isolation -v > evidence/replay.stdout 2> evidence/replay.stderr
+          replay=$?
+          echo "$replay" > evidence/replay.exit
+          printf '%s\n' 'python skills/open-lab/integration/upgrade_contract.py' > evidence/upgrade.command
+          python skills/open-lab/integration/upgrade_contract.py > evidence/upgrade.stdout 2> evidence/upgrade.stderr
+          upgrade=$?
+          echo "$upgrade" > evidence/upgrade.exit
+          cat evidence/*.stdout evidence/*.stderr
+          test "$replay" = 0 && test "$upgrade" = 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-replay-${{ github.sha }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
