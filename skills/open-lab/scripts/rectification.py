@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Advisory, version-bound claim comparisons; never a claim status writer.
 
-The first pass deliberately has no live Jev transport. MockJev is an explicit
-fixture boundary, not a heuristic replacement or a source of mathematical truth.
+Live Jev is explicitly opt-in and bounded. MockJev remains a distinct fixture
+boundary, not a heuristic replacement or a source of mathematical truth.
 """
 import hashlib
 import json
@@ -54,10 +54,32 @@ class MockJev:
         return probabilities(self.responses[key])
 
 
+_LIVE_JUDGES = {}  # Per-process budget shared across this lab's problem checks.
+
+
 def configured_judge(root):
     import claims
     config = claims.local_config(root).get('rectification') or {}
     path = config.get('mock_responses')
+    live = config.get('live') or {}
+    if live.get('enabled') is True:
+        if path:
+            raise ValueError('mock and live Jev configurations are mutually exclusive')
+        fingerprint = (str(Path(root).resolve()), json.dumps(live, sort_keys=True),
+                       os.environ.get('LAB_BOOK_ALLOW_PAID_JEV'),
+                       hashlib.sha256(os.environ.get('TYPESAFE_API_KEY', '').encode()).hexdigest())
+        if fingerprint in _LIVE_JUDGES:
+            return _LIVE_JUDGES[fingerprint]
+        import importlib.util
+        module_path = Path(__file__).resolve().parent / 'v3' / 'jev.py'
+        if not module_path.exists():
+            module_path = Path(__file__).resolve().parents[1] / 'assets' / 'v3' / 'jev.py'
+        spec = importlib.util.spec_from_file_location('lab_book_jev', module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        judge = module.JevJudge(live)
+        _LIVE_JUDGES[fingerprint] = judge
+        return judge
     if not path:
         return None
     path = Path(path)
@@ -223,6 +245,19 @@ def check_new(problem, ids, tag=None, judge=None):
     source = getattr(judge, 'source', 'unavailable') if judge else 'unavailable'
     counts = {'compared': 0, 'cached': 0, 'deferred': 0, 'source': source}
     attempted = {}
+    if judge is not None and hasattr(judge, 'prepare'):
+        pairs = {}
+        for cid in targets:
+            if known[cid]['status'] in TERMINAL:
+                continue
+            for other, d in known.items():
+                if other == cid or d['status'] in TERMINAL:
+                    continue
+                first, second = sorted((known[cid], d), key=lambda x: x['id'])
+                key = pair_key(first, second)
+                if key not in cache or cache[key]['source'] != source:
+                    pairs[key] = (first, second)
+        judge.prepare(pairs.values())
     for cid in targets:
         c = known[cid]
         if c['status'] in TERMINAL:
@@ -249,7 +284,8 @@ def check_new(problem, ids, tag=None, judge=None):
                 coverage['deferred'] += 1
                 continue
             try:
-                raw = probabilities(judge(first, second))
+                response = judge(first, second)
+                raw = probabilities(response)
             except Exception as e:
                 # A remote/provider failure is not a failed experiment. Retain
                 # the error class only; exception strings may contain secrets.
@@ -262,6 +298,8 @@ def check_new(problem, ids, tag=None, judge=None):
                                         'statement': x['statement'], 'conditions': x['conditions']}
                                        for x in (first, second)],
                    'probabilities': raw, 'source': source}
+            if getattr(response, 'provenance', None):
+                rec['provenance'] = response.provenance
             append(problem, rec, tag)
             attempted[key] = 'compared'
             coverage['compared'] += 1
